@@ -1,24 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Tokyo Kawaii Life (LIZ LISA) 商品卖空监控程序 — GitHub Actions 版
-================================================
-配合 GitHub Actions 每5分钟自动运行，发现卖空通过邮件+微信通知。
-
-配置通过环境变量读取（在 GitHub Secrets 中设置）:
-    SMTP_USER        Gmail 地址
-    SMTP_PASSWORD    Gmail 应用专用密码
-    EMAIL_TO         收件邮箱
-    SERVERCHAN_KEY   Server酱 SENDKEY
-"""
-
-import sys
-import os
-import re
-import json
-import smtplib
-import logging
-import ssl
+import sys, os, re, json, smtplib, logging, ssl
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -27,115 +9,72 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 from urllib.parse import urlencode
 
-# ──────────────────────────────────────────────
-# 配置（从环境变量读取）
-# ──────────────────────────────────────────────
-PRODUCT_URLS = [
-    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0",
-    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/162-6210-0",
-    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6041-0",
-    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6236-0",
-    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-2013-0",
-    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6235-0",
-    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6240-0",
+CATEGORY_URLS = [
+    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/c/all-items",
+    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/c/all-dresses",
+    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/c/all-tops",
+    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/c/all-bottoms",
+    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/c/all-outers",
+    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/c/all-shoes",
+    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/c/all-bags",
+    "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/c/all-goods",
 ]
-
+PRODUCT_URL_TEMPLATE = "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/{}"
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "")
 SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY", "")
-
-MAX_WORKERS = 5
+MAX_WORKERS = 15
 REQUEST_TIMEOUT = 15
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
-
-# 状态文件用临时目录（GitHub Actions 每次运行是全新环境）
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 STATE_FILE = "/tmp/monitor_state.json"
 
-# ──────────────────────────────────────────────
-# 日志
-# ──────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger("monitor")
 
-
-# ──────────────────────────────────────────────
-# 邮件通知
-# ──────────────────────────────────────────────
 def send_email(subject, body_html):
     if not SMTP_USER or not SMTP_PASSWORD or not EMAIL_TO:
-        logger.warning("邮件未配置，跳过")
         return False
     msg = MIMEMultipart("alternative")
-    msg["From"] = SMTP_USER
-    msg["To"] = EMAIL_TO
-    msg["Subject"] = subject
-    text_body = re.sub(r'<[^>]+>', '', body_html)
-    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg["From"] = SMTP_USER; msg["To"] = EMAIL_TO; msg["Subject"] = subject
+    msg.attach(MIMEText(re.sub(r'<[^>]+>', '', body_html), "plain", "utf-8"))
     msg.attach(MIMEText(body_html, "html", "utf-8"))
+    ctx = ssl.create_default_context()
+    for port in [587, 465]:
+        try:
+            if port == 587:
+                with smtplib.SMTP(SMTP_SERVER, 587, timeout=15) as s:
+                    s.ehlo(); s.starttls(context=ctx); s.ehlo()
+                    s.login(SMTP_USER, SMTP_PASSWORD)
+                    s.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
+            else:
+                with smtplib.SMTP_SSL(SMTP_SERVER, 465, context=ctx, timeout=15) as s:
+                    s.login(SMTP_USER, SMTP_PASSWORD)
+                    s.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
+            logger.info(f"邮件已发送: {subject}")
+            return True
+        except Exception as e:
+            logger.debug(f"端口{port}失败: {e}")
+    logger.error("邮件发送失败")
+    return False
 
-    context = ssl.create_default_context()
-    # STARTTLS (587)
-    try:
-        with smtplib.SMTP(SMTP_SERVER, 587, timeout=15) as server:
-            server.ehlo()
-            server.starttls(context=context)
-            server.ehlo()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
-        logger.info(f"邮件已发送: {subject}")
-        return True
-    except Exception as e1:
-        logger.debug(f"STARTTLS失败: {e1}")
-    # SSL (465)
-    try:
-        with smtplib.SMTP_SSL(SMTP_SERVER, 465, context=context, timeout=15) as server:
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
-        logger.info(f"邮件已发送: {subject}")
-        return True
-    except Exception as e2:
-        logger.error(f"邮件发送失败: {e2}")
-        return False
-
-
-# ──────────────────────────────────────────────
-# 微信推送
-# ──────────────────────────────────────────────
 def send_wechat(title, desp):
     if not SERVERCHAN_KEY:
-        logger.warning("微信未配置，跳过")
         return False
-    title = title[:32]
     url = f"https://sctapi.ftqq.com/{SERVERCHAN_KEY}.send"
-    data = urlencode({"title": title, "desp": desp}).encode("utf-8")
-    req = Request(url, data=data, method="POST")
+    data = urlencode({"title": title[:32], "desp": desp}).encode("utf-8")
     try:
-        with urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            if result.get("code") == 0:
+        with urlopen(Request(url, data=data, method="POST"), timeout=10) as resp:
+            r = json.loads(resp.read().decode("utf-8"))
+            if r.get("code") == 0:
                 logger.info(f"微信推送已发送: {title}")
                 return True
-            else:
-                logger.error(f"微信推送失败: {result.get('message', '未知')}")
-                return False
+            logger.error(f"微信推送失败: {r.get('message')}")
     except Exception as e:
         logger.error(f"微信推送失败: {e}")
-        return False
+    return False
 
-
-# ──────────────────────────────────────────────
-# 通知
-# ──────────────────────────────────────────────
 def notify_events(events):
     if not events:
         return
@@ -146,202 +85,108 @@ def notify_events(events):
     else:
         subject = f"🚨 {len(events)} 个SKU卖空告警"
         title = f"{len(events)}个SKU卖空"
-
-    rows_html = ""
+    rows = ""
     for e in events:
-        rows_html += f"""
-        <tr>
-          <td style="padding:8px;border:1px solid #ddd;">{e['product_name']}</td>
-          <td style="padding:8px;border:1px solid #ddd;color:#e74c3c;font-weight:bold;">{e['sku']}</td>
-          <td style="padding:8px;border:1px solid #ddd;">{e['time'][:19].replace('T',' ')}</td>
-          <td style="padding:8px;border:1px solid #ddd;"><a href="{e['url']}">查看商品</a></td>
-        </tr>"""
-    body_html = f"""
-    <html><body style="font-family:sans-serif;">
-    <h2 style="color:#e74c3c;">🚨 商品卖空告警</h2>
-    <p>以下 <b>{len(events)}</b> 个SKU刚刚卖空：</p>
-    <table style="border-collapse:collapse;width:100%;">
-      <tr style="background:#f8f9fa;">
-        <th style="padding:8px;border:1px solid #ddd;">商品名称</th>
-        <th style="padding:8px;border:1px solid #ddd;">卖空SKU</th>
-        <th style="padding:8px;border:1px solid #ddd;">时间</th>
-        <th style="padding:8px;border:1px solid #ddd;">链接</th>
-      </tr>
-      {rows_html}
-    </table>
-    <p style="color:#999;margin-top:16px;">Tokyo Kawaii Life 监控程序自动发送</p>
-    </body></html>"""
-
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#e74c3c;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;">{e["time"][:19]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#e74c3c;">🚨 商品卖空告警</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
     desp = ""
     for e in events:
-        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- 时间: {e['time'][:19]}\n- [查看商品]({e['url']})\n\n"
-
-    send_email(subject, body_html)
+        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n\n"
+    send_email(subject, body)
     send_wechat(title, desp)
 
-
-# ──────────────────────────────────────────────
-# HTML 解析
-# ──────────────────────────────────────────────
-def parse_product(html_text):
-    name_match = re.search(r'<h1[^>]*class="[^"]*itemTitle[^"]*"[^>]*>(.*?)</h1>',
-                           html_text, re.DOTALL)
-    product_name = name_match.group(1).strip() if name_match else ""
-
-    num_match = re.search(r'<p[^>]*class="[^"]*itemNumber[^"]*"[^>]*>商品番号\s*　\s*(.*?)</p>',
-                          html_text, re.DOTALL)
-    product_number = num_match.group(1).strip() if num_match else ""
-
-    table_match = re.search(r'<div[^>]*class="[^"]*FS2_additional_image_tableVariation[^"]*"[^>]*>(.*?)</div>',
-                            html_text, re.DOTALL)
-    table_html = table_match.group(1) if table_match else ""
-
+def parse_product(html):
+    m = re.search(r'<h1[^>]*itemTitle[^>]*>(.*?)</h1>', html, re.DOTALL)
+    name = m.group(1).strip() if m else ""
+    m2 = re.search(r'商品番号\s*　\s*(.*?)</p>', html, re.DOTALL)
+    num = m2.group(1).strip() if m2 else ""
+    m3 = re.search(r'FS2_additional_image_tableVariation[^>]*>(.*?)</div>', html, re.DOTALL)
+    tbl = m3.group(1) if m3 else ""
     skus = []
-    for tr_match in re.finditer(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL):
-        tds = re.findall(r'<td[^>]*>(.*?)</td>', tr_match.group(1), re.DOTALL)
+    for tr in re.finditer(r'<tr[^>]*>(.*?)</tr>', tbl, re.DOTALL):
+        tds = re.findall(r'<td[^>]*>(.*?)</td>', tr.group(1), re.DOTALL)
         if len(tds) < 2:
             continue
-        sku_name_raw = tds[0].strip()
-        button_html = tds[1].strip()
-        sku_name_clean = re.sub(r'<[^>]+>', '', sku_name_raw).strip()
-        if not sku_name_clean:
+        raw = tds[0].strip()
+        clean = re.sub(r'<[^>]+>', '', raw).strip()
+        if not clean:
             continue
-        is_sold_out = bool(re.search(r'SOLD\s*OUT', sku_name_raw, re.IGNORECASE))
-        clean_name = re.sub(r'\s*/?\s*SOLD\s*OUT\s*$', '', sku_name_clean,
-                            flags=re.IGNORECASE).strip()
-        var_match = re.search(r'name="varno_(\d+_\d+)"', button_html)
-        skus.append({
-            "name": clean_name,
-            "sold_out": is_sold_out,
-            "variation_id": var_match.group(1) if var_match else "",
-        })
+        sold = bool(re.search(r'SOLD\s*OUT', raw, re.IGNORECASE))
+        clean = re.sub(r'\s*/?\s*SOLD\s*OUT\s*$', '', clean, flags=re.IGNORECASE).strip()
+        skus.append({"name": clean, "sold_out": sold})
+    return {"name": name, "number": num, "skus": skus}
 
-    return {"name": product_name, "number": product_number, "skus": skus}
-
-
-# ──────────────────────────────────────────────
-# 网络请求
-# ──────────────────────────────────────────────
 def fetch_page(url):
-    req = Request(url, headers={
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "ja,en;q=0.9",
-    })
+    req = Request(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.9"})
     with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
         raw = resp.read()
     try:
         return raw.decode("Shift_JIS")
-    except (UnicodeDecodeError, LookupError):
+    except:
         return raw.decode("utf-8", errors="replace")
 
+def discover_product_urls():
+    product_ids = set()
+    for cat_url in CATEGORY_URLS:
+        try:
+            html = fetch_page(cat_url)
+            ids = re.findall(r'lizlisaadmin/[a-z_-]+/(\d+-\d+-\d+)', html)
+            product_ids.update(ids)
+        except Exception as e:
+            logger.warning(f"抓取分类页失败: {cat_url} → {e}")
+    urls = [PRODUCT_URL_TEMPLATE.format(pid) for pid in sorted(product_ids)]
+    logger.info(f"从 {len(CATEGORY_URLS)} 个分类页发现 {len(urls)} 个商品")
+    return urls
 
-# ──────────────────────────────────────────────
-# 状态管理（用 GitHub Actions Cache 持久化）
-# ──────────────────────────────────────────────
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except:
             pass
     return {}
 
 def save_state(state):
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-    except (OSError, PermissionError):
+            json.dump(state, f, ensure_ascii=False)
+    except:
         pass
 
-
-# ──────────────────────────────────────────────
-# 监控逻辑
-# ──────────────────────────────────────────────
 def check_product(url):
     try:
-        html = fetch_page(url)
-        info = parse_product(html)
-        return url, info
-    except (URLError, HTTPError, TimeoutError, OSError) as e:
+        return url, parse_product(fetch_page(url))
+    except Exception as e:
         logger.warning(f"抓取失败: {url} → {e}")
         return url, None
 
-
-def monitor_once(urls, prev_state):
+def main():
+    if "--test-notify" in sys.argv:
+        notify_events([{"product_name": "【测试】", "sku": "【测试】", "url": "", "time": datetime.now().isoformat()}])
+        return
+    product_urls = discover_product_urls()
+    logger.info(f"监控启动: {len(product_urls)} 个商品")
+    prev = load_state()
     new_state = {}
     events = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {pool.submit(check_product, url): url for url in urls}
-        for future in as_completed(futures):
-            url = futures[future]
-            _, info = future.result()
-            if info is None:
+        futures = {pool.submit(check_product, u): u for u in product_urls}
+        for f in as_completed(futures):
+            url, info = f.result()
+            if not info:
                 continue
-            current_skus = {sku["name"]: sku["sold_out"] for sku in info["skus"]}
-            new_state[url] = {
-                "name": info["name"],
-                "number": info["number"],
-                "skus": current_skus,
-                "checked_at": datetime.now().isoformat(),
-            }
-            prev_skus = prev_state.get(url, {}).get("skus", {})
-            for sku_name, is_sold_out in current_skus.items():
-                if is_sold_out and not prev_skus.get(sku_name, False):
-                    events.append({
-                        "type": "SOLD_OUT",
-                        "product_name": info["name"],
-                        "product_number": info["number"],
-                        "sku": sku_name,
-                        "url": url,
-                        "time": datetime.now().isoformat(),
-                    })
-    return new_state, events
-
-
-# ──────────────────────────────────────────────
-# 主函数
-# ──────────────────────────────────────────────
-def main():
-    logger.info(f"监控启动: {len(PRODUCT_URLS)} 个商品")
-
-    # 测试通知模式
-    if "--test-notify" in sys.argv:
-        logger.info("发送测试通知...")
-        notify_events([{
-            "type": "SOLD_OUT",
-            "product_name": "【测试】シアーフリルセットアップ",
-            "product_number": "262-6230-0",
-            "sku": "【测试】ピンク(110)",
-            "url": "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0",
-            "time": datetime.now().isoformat(),
-        }])
-        logger.info("测试通知发送完毕")
-        return
-
-    prev_state = load_state()
-    if prev_state:
-        logger.info(f"已加载状态 ({len(prev_state)} 个商品)")
-
-    new_state, events = monitor_once(urls=PRODUCT_URLS, prev_state=prev_state)
-
-    # 打印状态
-    for url, info in new_state.items():
-        name = info.get("name", "???")
-        for sku_name, sold_out in info.get("skus", {}).items():
-            status = "❌卖空" if sold_out else "✅在售"
-            logger.info(f"  {name} - {sku_name}: {status}")
-
+            cur = {s["name"]: s["sold_out"] for s in info["skus"]}
+            new_state[url] = {"name": info["name"], "skus": cur}
+            for sn, so in cur.items():
+                if so and not prev.get(url, {}).get("skus", {}).get(sn, False):
+                    events.append({"product_name": info["name"], "sku": sn, "url": url, "time": datetime.now().isoformat()})
+                    logger.info(f"🚨 卖空: {info['name']} - {sn}")
     if events:
-        for event in events:
-            logger.info(f"🚨 卖空: {event['product_name']} - {event['sku']}")
         notify_events(events)
     else:
         logger.info("本轮无新卖空")
-
     save_state(new_state)
-
 
 if __name__ == "__main__":
     main()
