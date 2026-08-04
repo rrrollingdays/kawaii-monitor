@@ -128,65 +128,14 @@ def fetch_page(url):
 def discover_product_urls():
     product_ids = set()
     for cat_url in CATEGORY_URLS:
-        try:
-            html = fetch_page(cat_url)
-            ids = re.findall(r'lizlisaadmin/[a-z_-]+/(\d+-\d+-\d+)', html)
-            product_ids.update(ids)
-        except Exception as e:
-            logger.warning(f"抓取分类页失败: {cat_url} → {e}")
-    urls = [PRODUCT_URL_TEMPLATE.format(pid) for pid in sorted(product_ids)]
-    logger.info(f"从 {len(CATEGORY_URLS)} 个分类页发现 {len(urls)} 个商品")
-    return urls
-
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            pass
-    return {}
-
-def save_state(state):
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False)
-    except:
-        pass
-
-def check_product(url):
-    try:
-        return url, parse_product(fetch_page(url))
-    except Exception as e:
-        logger.warning(f"抓取失败: {url} → {e}")
-        return url, None
-
-def main():
-    if "--test-notify" in sys.argv:
-        notify_events([{"product_name": "【测试】", "sku": "【测试】", "url": "", "time": datetime.now().isoformat()}])
-        return
-    product_urls = discover_product_urls()
-    logger.info(f"监控启动: {len(product_urls)} 个商品")
-    prev = load_state()
-    new_state = {}
-    events = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {pool.submit(check_product, u): u for u in product_urls}
-        for f in as_completed(futures):
-            url, info = f.result()
-            if not info:
-                continue
-            cur = {s["name"]: s["sold_out"] for s in info["skus"]}
-            new_state[url] = {"name": info["name"], "skus": cur}
-            for sn, so in cur.items():
-                if so and not prev.get(url, {}).get("skus", {}).get(sn, False):
-                    events.append({"product_name": info["name"], "sku": sn, "url": url, "time": datetime.now().isoformat()})
-                    logger.info(f"🚨 卖空: {info['name']} - {sn}")
-    if events:
-        notify_events(events)
-    else:
-        logger.info("本轮无新卖空")
-    save_state(new_state)
-
-if __name__ == "__main__":
-    main()
+        page = 1
+        while True:
+            url = cat_url if page == 1 else f"{cat_url}/1/{page}"
+            try:
+                html = fetch_page(url)
+                ids = re.findall(r'lizlisaadmin/[a-z_-]+/(\d+-\d+-\d+)', html)
+                if not ids:
+                    break
+                before = len(product_ids)
+                product_ids.update(ids)
+                if len page > 1
