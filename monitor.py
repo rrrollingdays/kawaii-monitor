@@ -78,6 +78,14 @@ def send_wechat(title, desp):
 def notify_events(events):
     if not events:
         return
+    soldout_events = [e for e in events if e["type"] == "SOLD_OUT"]
+    restock_events = [e for e in events if e["type"] == "RESTOCK"]
+    if soldout_events:
+        _notify_soldout(soldout_events)
+    if restock_events:
+        _notify_restock(restock_events)
+
+def _notify_soldout(events):
     if len(events) == 1:
         e = events[0]
         subject = f"🚨 卖空告警: {e['product_name']} - {e['sku']}"
@@ -87,8 +95,26 @@ def notify_events(events):
         title = f"{len(events)}个SKU卖空"
     rows = ""
     for e in events:
-        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#e74c3c;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;">{e["time"][:19]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#e74c3c;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
     body = f'<html><body><h2 style="color:#e74c3c;">🚨 商品卖空告警</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
+    desp = ""
+    for e in events:
+        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n\n"
+    send_email(subject, body)
+    send_wechat(title, desp)
+
+def _notify_restock(events):
+    if len(events) == 1:
+        e = events[0]
+        subject = f"📦 补货通知: {e['product_name']} - {e['sku']}"
+        title = f"补货: {e['product_name'][:20]}"
+    else:
+        subject = f"📦 {len(events)} 个SKU补货通知"
+        title = f"{len(events)}个SKU补货"
+    rows = ""
+    for e in events:
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#27ae60;">📦 补货通知</h2><p>{len(events)} 个SKU已补货上架:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
     desp = ""
     for e in events:
         desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n\n"
@@ -138,4 +164,79 @@ def discover_product_urls():
                     break
                 before = len(product_ids)
                 product_ids.update(ids)
-                if len page > 1
+                if len(product_ids) == before and page > 1:
+                    break
+                pager = re.search(r'(\d+) 件中.*?(\d+)-(\d+) 件表示', html)
+                if pager:
+                    if int(pager.group(3)) >= int(pager.group(1)):
+                        break
+                else:
+                    break
+                page += 1
+            except Exception as e:
+                logger.warning(f"抓取分类页失败: {url} → {e}")
+                break
+    urls = [PRODUCT_URL_TEMPLATE.format(pid) for pid in sorted(product_ids)]
+    logger.info(f"发现 {len(urls)} 个商品")
+    return urls
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False)
+    except:
+        pass
+
+def check_product(url):
+    try:
+        return url, parse_product(fetch_page(url))
+    except Exception as e:
+        logger.warning(f"抓取失败: {url} → {e}")
+        return url, None
+
+def main():
+    if "--test-notify" in sys.argv:
+        notify_events([
+            {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "sku": "ピンク(110)", "url": "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0", "time": datetime.now().isoformat()},
+            {"type": "RESTOCK", "product_name": "【测试-补货】", "sku": "ブラック(104)", "url": "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0", "time": datetime.now().isoformat()},
+        ])
+        return
+    product_urls = discover_product_urls()
+    logger.info(f"监控启动: {len(product_urls)} 个商品")
+    prev = load_state()
+    new_state = {}
+    events = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(check_product, u): u for u in product_urls}
+        for f in as_completed(futures):
+            url, info = f.result()
+            if not info:
+                continue
+            cur = {s["name"]: s["sold_out"] for s in info["skus"]}
+            new_state[url] = {"name": info["name"], "skus": cur}
+            prev_skus = prev.get(url, {}).get("skus", {})
+            for sn, so in cur.items():
+                was = prev_skus.get(sn, False)
+                if so and not was:
+                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "url": url, "time": datetime.now().isoformat()})
+                    logger.info(f"🚨 卖空: {info['name']} - {sn}")
+                elif not so and was:
+                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "url": url, "time": datetime.now().isoformat()})
+                    logger.info(f"📦 补货: {info['name']} - {sn}")
+    if events:
+        notify_events(events)
+    else:
+        logger.info("本轮无变化")
+    save_state(new_state)
+
+if __name__ == "__main__":
+    main()
