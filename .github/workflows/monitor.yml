@@ -1,4 +1,5 @@
-name: Monitor Sold Out
+name: LIZLISA Monitor Sold Out
+
 
 on:
   schedule:
