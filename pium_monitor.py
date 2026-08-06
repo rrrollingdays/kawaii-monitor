@@ -56,7 +56,6 @@ def discover_product_handles():
             break
     logger.info(f"共发现 {len(handles)} 个商品")
     return sorted(handles)
-
 def parse_product(handle):
     json_url = f"{BASE_URL}/products/{handle}.json"
     try:
@@ -64,14 +63,11 @@ def parse_product(handle):
     except Exception as e:
         logger.warning(f"JSON抓取失败: {handle} → {e}")
         return parse_product_html(handle)
-
     product = data.get("product", {})
     if not product:
         return parse_product_html(handle)
-
     name = product.get("title", handle)
     variants = product.get("variants", [])
-
     skus = []
     need_html = True
     for v in variants:
@@ -80,15 +76,12 @@ def parse_product(handle):
         if available is not None:
             need_html = False
         skus.append({"name": vtitle, "variant_id": v.get("id", ""), "sold_out": not available if available is not None else None})
-
     if need_html:
         return parse_product_html(handle, name, skus)
-
     image = ""
     images = product.get("images", [])
     if images:
         image = images[0].get("src", "")
-
     return {"name": name, "handle": handle, "url": f"{BASE_URL}/products/{handle}", "image": image, "skus": skus}
 
 def parse_product_html(handle, name=None, json_skus=None):
@@ -98,11 +91,9 @@ def parse_product_html(handle, name=None, json_skus=None):
     except Exception as e:
         logger.warning(f"HTML抓取失败: {handle} → {e}")
         return None
-
     if not name:
         m = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL)
         name = m.group(1).strip() if m else handle
-
     vid_map = {}
     if json_skus:
         for s in json_skus:
@@ -113,10 +104,8 @@ def parse_product_html(handle, name=None, json_skus=None):
         if not vid_map:
             for m in re.finditer(r'data-option-value="([^"]*)"[^>]*data-variant-id="(\d+)"', html):
                 vid_map[m.group(2)] = m.group(1)
-
     skus = []
     forms = re.findall(r'<form[^>]*action="/cart/add"[^>]*>.*?</form>', html, re.DOTALL)
-
     if forms:
         for form_html in forms:
             vid_m = re.search(r'value="(\d+)"', form_html)
@@ -136,24 +125,15 @@ def parse_product_html(handle, name=None, json_skus=None):
             ctx = html[ctx_start:ctx_end]
             sold_out = "sold-out" in ctx.lower() or "Sold Out" in ctx
             skus.append({"name": title, "variant_id": vid, "sold_out": sold_out})
-
     if not skus and json_skus:
         skus = json_skus
-
     image = ""
     og_m = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', html)
     if og_m:
         image = og_m.group(1)
-    else:
-        img_m = re.search(r'<img[^>]*class="[^"]*product-image[^"]*"[^>]*src="([^"]+)"', html)
-        if img_m:
-            image = img_m.group(1)
-
     return {"name": name, "handle": handle, "url": url, "image": image, "skus": skus}
-
 def send_email(subject, body_html):
     if not SMTP_USER or not SMTP_PASSWORD or not EMAIL_TO:
-        logger.warning("邮件配置不完整，跳过")
         return False
     msg = MIMEMultipart("alternative")
     msg["From"] = SMTP_USER
@@ -166,7 +146,9 @@ def send_email(subject, body_html):
         try:
             if port == 587:
                 with smtplib.SMTP(SMTP_SERVER, 587, timeout=15) as s:
-                    s.ehlo(); s.starttls(context=ctx); s.ehlo()
+                    s.ehlo()
+                    s.starttls(context=ctx)
+                    s.ehlo()
                     s.login(SMTP_USER, SMTP_PASSWORD)
                     s.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
             else:
@@ -182,7 +164,6 @@ def send_email(subject, body_html):
 
 def send_wechat(title, desp):
     if not SERVERCHAN_KEY:
-        logger.warning("Server酱未配置，跳过")
         return False
     url = f"https://sctapi.ftqq.com/{SERVERCHAN_KEY}.send"
     data = urlencode({"title": title[:32], "desp": desp}).encode("utf-8")
@@ -254,10 +235,72 @@ def _notify_restock(events):
         desp += "\n"
     send_email(subject, body)
     send_wechat(title, desp)
-
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
+        except:
+            pass
+    return {}
 
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False)
+    except:
+        pass
+
+def check_product(handle):
+    try:
+        return handle, parse_product(handle)
+    except Exception as e:
+        logger.warning(f"抓取失败: {handle} → {e}")
+        return handle, None
+
+def main():
+    if "--test-notify" in sys.argv:
+        notify_events([
+            {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "sku": "グレー / Free", "url": "https://piumofficial.com/products/test", "image": "", "time": datetime.now().isoformat()},
+            {"type": "RESTOCK", "product_name": "【测试-补货】", "sku": "ブラック / Free", "url": "https://piumofficial.com/products/test", "image": "", "time": datetime.now().isoformat()},
+        ])
+        return
+
+    handles = discover_product_handles()
+    logger.info(f"pium 监控启动: {len(handles)} 个商品")
+    prev = load_state()
+    new_state = {}
+    events = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(check_product, h): h for h in handles}
+        for f in as_completed(futures):
+            handle, info = f.result()
+            if not info:
+                continue
+            url = info["url"]
+            cur = {}
+            for s in info["skus"]:
+                if s.get("sold_out") is not None:
+                    cur[s["name"]] = s["sold_out"]
+            if not cur:
+                continue
+            new_state[url] = {"name": info["name"], "image": info.get("image", ""), "skus": cur}
+            prev_skus = prev.get(url, {}).get("skus", {})
+            for sn, so in cur.items():
+                was = prev_skus.get(sn, False)
+                if so and not was:
+                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "url": url, "image": info.get("image", ""), "time": datetime.now().isoformat()})
+                    logger.info(f"🚨 卖空: {info['name']} - {sn}")
+                elif not so and was:
+                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "url": url, "image": info.get("image", ""), "time": datetime.now().isoformat()})
+                    logger.info(f"📦 补货: {info['name']} - {sn}")
+    logger.info(f"扫描完成: {len(new_state)} 个商品, {sum(len(v['skus']) for v in new_state.values())} 个SKU, {len(events)} 个变化")
+    if events:
+        notify_events(events)
+    else:
+        logger.info("本轮无变化")
+    save_state(new_state)
+    logger.info("状态已保存")
+
+if __name__ == "__main__":
+    main()
