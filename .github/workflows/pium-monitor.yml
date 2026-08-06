@@ -7,6 +7,8 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,9 +24,7 @@ jobs:
         run: python pium_monitor.py --once
 
       - name: Save state
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pium_state.json || true
-          git diff --staged --quiet || git commit -m "update pium state"
-          git push || true
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: update pium state
+          file_pattern: pium_state.json
