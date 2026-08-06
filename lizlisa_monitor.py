@@ -30,7 +30,6 @@ REQUEST_TIMEOUT = 15
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 STATE_FILE = os.environ.get("STATE_FILE", "/tmp/monitor_state.json")
 
-
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger("monitor")
 
@@ -89,36 +88,48 @@ def notify_events(events):
 def _notify_soldout(events):
     if len(events) == 1:
         e = events[0]
-        subject = f"🚨 卖空告警: {e['product_name']} - {e['sku']}"
-        title = f"卖空: {e['product_name'][:20]}"
+        subject = f"🚨 [lizlisa] 卖空: {e['product_name']} - {e['sku']}"
+        title = f"[lizlisa]卖空:{e['product_name'][:15]}"
     else:
-        subject = f"🚨 {len(events)} 个SKU卖空告警"
-        title = f"{len(events)}个SKU卖空"
+        subject = f"🚨 [lizlisa] {len(events)} 个SKU卖空"
+        title = f"[lizlisa]{len(events)}个SKU卖空"
     rows = ""
+    img_tags = ""
     for e in events:
         rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#e74c3c;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
-    body = f'<html><body><h2 style="color:#e74c3c;">🚨 商品卖空告警</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
-    desp = ""
+        if e.get("image"):
+            img_tags += f'<div style="margin:8px 0;"><img src="{e["image"]}" style="max-width:220px;border:1px solid #ddd;" loading="lazy"></div>'
+    body = f'<html><body><h2 style="color:#e74c3c;">🚨 [lizlisa] 商品卖空告警</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{rows}</table>{img_tags}</body></html>'
+    desp = "### [lizlisa] 卖空告警\n\n"
     for e in events:
-        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n\n"
+        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
+        if e.get("image"):
+            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
+        desp += "\n"
     send_email(subject, body)
     send_wechat(title, desp)
 
 def _notify_restock(events):
     if len(events) == 1:
         e = events[0]
-        subject = f"📦 补货通知: {e['product_name']} - {e['sku']}"
-        title = f"补货: {e['product_name'][:20]}"
+        subject = f"📦 [lizlisa] 补货: {e['product_name']} - {e['sku']}"
+        title = f"[lizlisa]补货:{e['product_name'][:15]}"
     else:
-        subject = f"📦 {len(events)} 个SKU补货通知"
-        title = f"{len(events)}个SKU补货"
+        subject = f"📦 [lizlisa] {len(events)} 个SKU补货"
+        title = f"[lizlisa]{len(events)}个SKU补货"
     rows = ""
+    img_tags = ""
     for e in events:
         rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
-    body = f'<html><body><h2 style="color:#27ae60;">📦 补货通知</h2><p>{len(events)} 个SKU已补货上架:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
-    desp = ""
+        if e.get("image"):
+            img_tags += f'<div style="margin:8px 0;"><img src="{e["image"]}" style="max-width:220px;border:1px solid #ddd;" loading="lazy"></div>'
+    body = f'<html><body><h2 style="color:#27ae60;">📦 [lizlisa] 补货通知</h2><p>{len(events)} 个SKU已补货上架:</p><table style="border-collapse:collapse;">{rows}</table>{img_tags}</body></html>'
+    desp = "### [lizlisa] 补货通知\n\n"
     for e in events:
-        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n\n"
+        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
+        if e.get("image"):
+            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
+        desp += "\n"
     send_email(subject, body)
     send_wechat(title, desp)
 
@@ -141,7 +152,11 @@ def parse_product(html):
         sold = bool(re.search(r'SOLD\s*OUT', raw, re.IGNORECASE))
         clean = re.sub(r'\s*/?\s*SOLD\s*OUT\s*$', '', clean, flags=re.IGNORECASE).strip()
         skus.append({"name": clean, "sold_out": sold})
-    return {"name": name, "number": num, "skus": skus}
+    image = ""
+    img_m = re.search(r'https://lizlisaadmin\.fs-storage\.jp/fs2cabinet/[^"\'<>\s]*-m-01-ds\.[^"\'<>\s]+', html)
+    if img_m:
+        image = img_m.group(0).replace("-ds.", "-pl.")
+    return {"name": name, "number": num, "image": image, "skus": skus}
 
 def fetch_page(url):
     req = Request(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.9"})
@@ -223,15 +238,15 @@ def main():
             if not info:
                 continue
             cur = {s["name"]: s["sold_out"] for s in info["skus"]}
-            new_state[url] = {"name": info["name"], "skus": cur}
+            new_state[url] = {"name": info["name"], "image": info.get("image", ""), "skus": cur}
             prev_skus = prev.get(url, {}).get("skus", {})
             for sn, so in cur.items():
                 was = prev_skus.get(sn, False)
                 if so and not was:
-                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "url": url, "time": datetime.now().isoformat()})
+                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "url": url, "image": info.get("image", ""), "time": datetime.now().isoformat()})
                     logger.info(f"🚨 卖空: {info['name']} - {sn}")
                 elif not so and was:
-                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "url": url, "time": datetime.now().isoformat()})
+                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "url": url, "image": info.get("image", ""), "time": datetime.now().isoformat()})
                     logger.info(f"📦 补货: {info['name']} - {sn}")
     if events:
         notify_events(events)
