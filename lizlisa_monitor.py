@@ -28,7 +28,8 @@ SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY", "")
 MAX_WORKERS = 15
 REQUEST_TIMEOUT = 15
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-STATE_FILE = "/tmp/monitor_state.json"
+STATE_FILE = os.environ.get("STATE_FILE", "/tmp/monitor_state.json")
+
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger("monitor")
