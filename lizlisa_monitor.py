@@ -132,7 +132,6 @@ def _notify_restock(events):
         desp += "\n"
     send_email(subject, body)
     send_wechat(title, desp)
-
 def parse_product(html):
     m = re.search(r'<h1[^>]*itemTitle[^>]*>(.*?)</h1>', html, re.DOTALL)
     name = m.group(1).strip() if m else ""
@@ -152,11 +151,19 @@ def parse_product(html):
         sold = bool(re.search(r'SOLD\s*OUT', raw, re.IGNORECASE))
         clean = re.sub(r'\s*/?\s*SOLD\s*OUT\s*$', '', clean, flags=re.IGNORECASE).strip()
         skus.append({"name": clean, "sold_out": sold})
+    # 提取商品主图（模特图）
     image = ""
     img_m = re.search(r'https://lizlisaadmin\.fs-storage\.jp/fs2cabinet/[^"\'<>\s]*-m-01-ds\.[^"\'<>\s]+', html)
     if img_m:
         image = img_m.group(0).replace("-ds.", "-pl.")
-    return {"name": name, "number": num, "image": image, "skus": skus}
+    # 提取每个颜色对应的图片（s-type 图片的 alt 属性包含颜色名）
+    color_images = {}
+    for m in re.finditer(r'<img[^>]*src="(https://lizlisaadmin\.fs-storage\.jp/fs2cabinet/[^"\'<>]*-s-\d+-ds\.jpg)"[^>]*alt="([^"]+)"', html):
+        img_url = m.group(1)
+        color_name = m.group(2).strip()
+        if color_name and color_name not in color_images:
+            color_images[color_name] = img_url.replace("-ds.", "-pl.")
+    return {"name": name, "number": num, "image": image, "color_images": color_images, "skus": skus}
 
 def fetch_page(url):
     req = Request(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.9"})
@@ -238,15 +245,18 @@ def main():
             if not info:
                 continue
             cur = {s["name"]: s["sold_out"] for s in info["skus"]}
-            new_state[url] = {"name": info["name"], "image": info.get("image", ""), "skus": cur}
+            new_state[url] = {"name": info["name"], "skus": cur}
+            color_images = info.get("color_images", {})
             prev_skus = prev.get(url, {}).get("skus", {})
             for sn, so in cur.items():
                 was = prev_skus.get(sn, False)
+                # 优先用颜色对应图片，没有就退回主图
+                sku_image = color_images.get(sn, "") or info.get("image", "")
                 if so and not was:
-                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "url": url, "image": info.get("image", ""), "time": datetime.now().isoformat()})
+                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"🚨 卖空: {info['name']} - {sn}")
                 elif not so and was:
-                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "url": url, "image": info.get("image", ""), "time": datetime.now().isoformat()})
+                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"📦 补货: {info['name']} - {sn}")
     if events:
         notify_events(events)
