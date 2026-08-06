@@ -258,4 +258,6 @@ def _notify_restock(events):
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
-            with open(STATE_FILE, "r", encoding="utf f:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+
