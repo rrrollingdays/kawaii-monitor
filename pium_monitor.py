@@ -438,7 +438,7 @@ def main():
         futures = {pool.submit(check_product, h): h for h in handles}
         for f in as_completed(futures):
             handle, info = f.result()
-                        if not info:
+            if not info:
                 url = f"{BASE_URL}/products/{handle}"
                 if url in prev:
                     new_state[url] = prev[url]
