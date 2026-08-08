@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+6#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 piumofficial.com 卖空/补货监控脚本
@@ -20,7 +20,7 @@ from urllib.parse import urlencode
 BASE_URL = "https://piumofficial.com"
 COLLECTION_URL = "https://piumofficial.com/collections/all-items"
 MAX_PAGES = 20          # 最多扫描的页数
-MAX_WORKERS = 10        # 并发抓取数
+MAX_WORKERS = 5        # 并发抓取数
 REQUEST_TIMEOUT = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
@@ -438,9 +438,14 @@ def main():
         futures = {pool.submit(check_product, h): h for h in handles}
         for f in as_completed(futures):
             handle, info = f.result()
-            if not info:
+                        if not info:
+                url = f"{BASE_URL}/products/{handle}"
+                if url in prev:
+                    new_state[url] = prev[url]
+                    logger.info(f"抓取失败，保留旧状态: {handle}")
                 continue
             url = info["url"]
+
             # SKU 状态: {sku_name: sold_out}
             cur = {}
             for s in info["skus"]:
