@@ -14,7 +14,7 @@ from email.mime.multipart import MIMEMultipart
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, unquote
 
 # ======================== 配置 ========================
 BASE_URL = "https://piumofficial.com"
@@ -37,7 +37,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("pium-monitor")
-
 # ======================== 网络请求 ========================
 def fetch_url(url):
     """抓取 URL 返回文本"""
@@ -81,6 +80,7 @@ def discover_product_handles():
             break
     logger.info(f"共发现 {len(handles)} 个商品")
     return sorted(handles)
+
 # ======================== 商品解析 ========================
 def parse_product(handle):
     """
@@ -134,7 +134,7 @@ def parse_product(handle):
 
     # 提取每个 variant 对应的图片
     # Shopify images 里有 variant_ids 字段关联 variant
-    # 如果没有 variant_ids，用 alt 字段里的 "カラー：ピンク" 匹配
+    # 如果没有 variant_ids，用 alt 字段里的 "カラー：xxx" 匹配
     variant_images = {}
     for img in images:
         src = img.get("src", "")
@@ -376,6 +376,19 @@ def _notify_restock(events):
     else:
         subject = f"📦 [pium] {len(events)} 个SKU补货"
         title = f"[pium]{len(events)}个SKU补货"
+    rows = ""
+    for e in events:
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#27ae60;">📦 [pium] 补货通知</h2><p>{len(events)} 个SKU已补货上架:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
+    desp = "### [pium] 补货通知\n\n"
+    for e in events:
+        desp += f"**{e['product_name']}**\n- 货号: {e.get('number', '无')}\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
+        if e.get("image"):
+            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
+        desp += "\n"
+    send_email(subject, body)
+    send_wechat(title, desp)
 # ======================== 状态管理 ========================
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -439,7 +452,9 @@ def main():
             new_state[url] = {"name": info["name"], "skus": cur}
             variant_images = info.get("variant_images", {})
             main_image = info.get("image", "")
-            product_number = info.get("handle", "")
+            # 货号 = handle（URL解码 + 去 -copy 等后缀）
+            raw_handle = unquote(info.get("handle", ""))
+            product_number = re.sub(r'-copy$|-1$|-2$', '', raw_handle)
             prev_skus = prev.get(url, {}).get("skus", {})
             for sn, so in cur.items():
                 was = prev_skus.get(sn, False)
