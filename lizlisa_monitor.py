@@ -94,15 +94,13 @@ def _notify_soldout(events):
         subject = f"🚨 [lizlisa] {len(events)} 个SKU卖空"
         title = f"[lizlisa]{len(events)}个SKU卖空"
     rows = ""
-    img_tags = ""
     for e in events:
-        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#e74c3c;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
-        if e.get("image"):
-            img_tags += f'<div style="margin:8px 0;"><img src="{e["image"]}" style="max-width:220px;border:1px solid #ddd;" loading="lazy"></div>'
-    body = f'<html><body><h2 style="color:#e74c3c;">🚨 [lizlisa] 商品卖空告警</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{rows}</table>{img_tags}</body></html>'
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;color:#e74c3c;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#e74c3c;">🚨 [lizlisa] 商品卖空告警</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
     desp = "### [lizlisa] 卖空告警\n\n"
     for e in events:
-        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
+        desp += f"**{e['product_name']}**\n- 货号: {e.get('number', '无')}\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
         if e.get("image"):
             desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
         desp += "\n"
@@ -118,15 +116,13 @@ def _notify_restock(events):
         subject = f"📦 [lizlisa] {len(events)} 个SKU补货"
         title = f"[lizlisa]{len(events)}个SKU补货"
     rows = ""
-    img_tags = ""
     for e in events:
-        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
-        if e.get("image"):
-            img_tags += f'<div style="margin:8px 0;"><img src="{e["image"]}" style="max-width:220px;border:1px solid #ddd;" loading="lazy"></div>'
-    body = f'<html><body><h2 style="color:#27ae60;">📦 [lizlisa] 补货通知</h2><p>{len(events)} 个SKU已补货上架:</p><table style="border-collapse:collapse;">{rows}</table>{img_tags}</body></html>'
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#27ae60;">📦 [lizlisa] 补货通知</h2><p>{len(events)} 个SKU已补货上架:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
     desp = "### [lizlisa] 补货通知\n\n"
     for e in events:
-        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
+        desp += f"**{e['product_name']}**\n- 货号: {e.get('number', '无')}\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
         if e.get("image"):
             desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
         desp += "\n"
@@ -229,8 +225,8 @@ def check_product(url):
 def main():
     if "--test-notify" in sys.argv:
         notify_events([
-            {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "sku": "ピンク(110)", "url": "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0", "time": datetime.now().isoformat()},
-            {"type": "RESTOCK", "product_name": "【测试-补货】", "sku": "ブラック(104)", "url": "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0", "time": datetime.now().isoformat()},
+            {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "sku": "ピンク(110)", "number": "262-6230-0", "url": "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0", "time": datetime.now().isoformat()},
+            {"type": "RESTOCK", "product_name": "【测试-补货】", "sku": "ブラック(104)", "number": "262-6230-0", "url": "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0", "time": datetime.now().isoformat()},
         ])
         return
     product_urls = discover_product_urls()
@@ -253,10 +249,10 @@ def main():
                 # 优先用颜色对应图片，没有就退回主图
                 sku_image = color_images.get(sn, "") or info.get("image", "")
                 if so and not was:
-                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "number": info.get("number", ""), "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"🚨 卖空: {info['name']} - {sn}")
                 elif not so and was:
-                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "number": info.get("number", ""), "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"📦 补货: {info['name']} - {sn}")
     if events:
         notify_events(events)
