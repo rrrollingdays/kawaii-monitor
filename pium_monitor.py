@@ -375,7 +375,7 @@ def _notify_restock(events):
         title = f"[pium]补货:{e['product_name'][:15]}"
     else:
         subject = f"📦 [pium] {len(events)} 个SKU补货"
-        title = f"[pium]{len(events)}个SKU
+        title = f"[pium]{len(events)}个SKU补货"
 # ======================== 状态管理 ========================
 def load_state():
     if os.path.exists(STATE_FILE):
