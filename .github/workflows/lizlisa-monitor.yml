@@ -1,4 +1,5 @@
 name: LIZLISA Monitor Sold Out
+
 on:
   schedule:
     - cron: '*/5 * * * *'
@@ -30,6 +31,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add lizlisa_state.json || true
-          git diff --staged --quiet || git commit -m "update lizlisa state"
-          git pull --rebase origin main || true
-          git push || true
+          git diff --staged --quiet && exit 0
+          git commit -m "update lizlisa state"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push origin main && exit 0
+            echo "Retry $i after conflict..."
+            sleep 5
+          done
+          echo "Failed to push after retries"
+          exit 1
