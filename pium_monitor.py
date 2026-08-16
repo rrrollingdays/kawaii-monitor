@@ -1,4 +1,4 @@
-6#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 piumofficial.com 卖空/补货监控脚本
@@ -20,7 +20,7 @@ from urllib.parse import urlencode
 BASE_URL = "https://piumofficial.com"
 COLLECTION_URL = "https://piumofficial.com/collections/all-items"
 MAX_PAGES = 20          # 最多扫描的页数
-MAX_WORKERS = 5        # 并发抓取数
+MAX_WORKERS = 5         # 并发抓取数
 REQUEST_TIMEOUT = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
@@ -355,15 +355,13 @@ def _notify_soldout(events):
         subject = f"🚨 [pium] {len(events)} 个SKU卖空"
         title = f"[pium]{len(events)}个SKU卖空"
     rows = ""
-    img_tags = ""
     for e in events:
-        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#e74c3c;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
-        if e.get("image"):
-            img_tags += f'<div style="margin:8px 0;"><img src="{e["image"]}" style="max-width:220px;border:1px solid #ddd;" loading="lazy"></div>'
-    body = f'<html><body><h2 style="color:#e74c3c;">🚨 [pium] 商品卖空告警</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{rows}</table>{img_tags}</body></html>'
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;color:#e74c3c;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#e74c3c;">🚨 [pium] 商品卖空告警</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
     desp = "### [pium] 卖空告警\n\n"
     for e in events:
-        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
+        desp += f"**{e['product_name']}**\n- 货号: {e.get('number', '无')}\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
         if e.get("image"):
             desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
         desp += "\n"
@@ -377,22 +375,7 @@ def _notify_restock(events):
         title = f"[pium]补货:{e['product_name'][:15]}"
     else:
         subject = f"📦 [pium] {len(events)} 个SKU补货"
-        title = f"[pium]{len(events)}个SKU补货"
-    rows = ""
-    img_tags = ""
-    for e in events:
-        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
-        if e.get("image"):
-            img_tags += f'<div style="margin:8px 0;"><img src="{e["image"]}" style="max-width:220px;border:1px solid #ddd;" loading="lazy"></div>'
-    body = f'<html><body><h2 style="color:#27ae60;">📦 [pium] 补货通知</h2><p>{len(events)} 个SKU已补货上架:</p><table style="border-collapse:collapse;">{rows}</table>{img_tags}</body></html>'
-    desp = "### [pium] 补货通知\n\n"
-    for e in events:
-        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
-        if e.get("image"):
-            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
-        desp += "\n"
-    send_email(subject, body)
-    send_wechat(title, desp)
+        title = f"[pium]{len(events)}个SKU
 # ======================== 状态管理 ========================
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -422,8 +405,8 @@ def check_product(handle):
 def main():
     if "--test-notify" in sys.argv:
         notify_events([
-            {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "sku": "グレー / Free", "url": "https://piumofficial.com/products/test", "time": datetime.now().isoformat()},
-            {"type": "RESTOCK", "product_name": "【测试-补货】", "sku": "ブラック / Free", "url": "https://piumofficial.com/products/test", "time": datetime.now().isoformat()},
+            {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "sku": "グレー / Free", "number": "1026a070301181", "url": "https://piumofficial.com/products/test", "time": datetime.now().isoformat()},
+            {"type": "RESTOCK", "product_name": "【测试-补货】", "sku": "ブラック / Free", "number": "1026a070301181", "url": "https://piumofficial.com/products/test", "time": datetime.now().isoformat()},
         ])
         return
 
@@ -439,13 +422,13 @@ def main():
         for f in as_completed(futures):
             handle, info = f.result()
             if not info:
+                # 抓取失败，保留旧状态
                 url = f"{BASE_URL}/products/{handle}"
                 if url in prev:
                     new_state[url] = prev[url]
                     logger.info(f"抓取失败，保留旧状态: {handle}")
                 continue
             url = info["url"]
-
             # SKU 状态: {sku_name: sold_out}
             cur = {}
             for s in info["skus"]:
@@ -456,6 +439,7 @@ def main():
             new_state[url] = {"name": info["name"], "skus": cur}
             variant_images = info.get("variant_images", {})
             main_image = info.get("image", "")
+            product_number = info.get("handle", "")
             prev_skus = prev.get(url, {}).get("skus", {})
             for sn, so in cur.items():
                 was = prev_skus.get(sn, False)
@@ -468,10 +452,10 @@ def main():
                             sku_image = variant_images[vid]
                         break
                 if so and not was:
-                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"🚨 卖空: {info['name']} - {sn}")
                 elif not so and was:
-                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"📦 补货: {info['name']} - {sn}")
 
     logger.info(f"扫描完成: {len(new_state)} 个商品, {sum(len(v['skus']) for v in new_state.values())} 个SKU, {len(events)} 个变化")
