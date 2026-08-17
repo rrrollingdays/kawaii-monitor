@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-piumofficial.com 卖空/补货监控脚本
+piumofficial.com 卖空/补货/上新监控脚本
 - Shopify 平台，通过 .json 接口获取商品数据
 - 通过 variant 的 available 字段判断是否卖空
-- 支持卖空通知 + 补货通知
+- 支持卖空通知 + 补货通知 + 上新通知
 - 邮件 + 微信双通道通知
 """
 import sys, os, re, json, smtplib, logging, ssl, time
@@ -20,7 +20,8 @@ from urllib.parse import urlencode, unquote
 BASE_URL = "https://piumofficial.com"
 COLLECTION_URL = "https://piumofficial.com/collections/all-items"
 MAX_PAGES = 20          # 最多扫描的页数
-MAX_WORKERS = 2         # 并发抓取数
+MAX_WORKERS = 2         # 并发抓取数（调低防限流）
+MAX_PER_RUN = 100       # 每轮最多扫描的商品数（分批防限流）
 REQUEST_TIMEOUT = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
@@ -363,6 +364,9 @@ def notify_events(events):
         return
     soldout_events = [e for e in events if e["type"] == "SOLD_OUT"]
     restock_events = [e for e in events if e["type"] == "RESTOCK"]
+    new_events = [e for e in events if e["type"] == "NEW"]
+    if new_events:
+        _notify_new(new_events)
     if soldout_events:
         _notify_soldout(soldout_events)
     if restock_events:
@@ -411,6 +415,28 @@ def _notify_restock(events):
         desp += "\n"
     send_email(subject, body)
     send_wechat(title, desp)
+
+def _notify_new(events):
+    if len(events) == 1:
+        e = events[0]
+        subject = f"🆕 [pium] 上新: {e['product_name']}"
+        title = f"[pium]上新:{e['product_name'][:15]}"
+    else:
+        subject = f"🆕 [pium] {len(events)} 个商品上新"
+        title = f"[pium]{len(events)}个上新"
+    rows = ""
+    for e in events:
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;color:#e67e22;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#e67e22;">🆕 [pium] 上新通知</h2><p>{len(events)} 个新商品上架:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
+    desp = "### [pium] 上新通知\n\n"
+    for e in events:
+        desp += f"**{e['product_name']}**\n- 货号: {e.get('number', '无')}\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
+        if e.get("image"):
+            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
+        desp += "\n"
+    send_email(subject, body)
+    send_wechat(title, desp)
 # ======================== 状态管理 ========================
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -449,14 +475,31 @@ def main():
     if not handles:
         logger.warning("未获取到商品列表，本轮跳过，保留旧状态")
         return
-    logger.info(f"pium 监控启动: {len(handles)} 个商品")
 
+    # 分批扫描：每轮只扫一部分，从上次停下的位置继续
     prev = load_state()
+    # 找出所有商品，按顺序排队
+    all_handles = sorted(handles)
+    # 用状态文件记录的"上次起点"决定本轮从哪开始
+    cursor = prev.get("_cursor", 0)
+    if cursor >= len(all_handles):
+        cursor = 0
+    # 本轮要扫的这一批
+    batch = all_handles[cursor:cursor + MAX_PER_RUN]
+    # 更新游标，供下一轮用
+    next_cursor = cursor + len(batch)
+    if next_cursor >= len(all_handles):
+        next_cursor = 0
+    logger.info(f"pium 监控启动: 总 {len(all_handles)} 个，本轮扫 {len(batch)} 个 (从第 {cursor} 个开始)")
+
+    # 上新检测：记录之前见过的所有商品（排除 _cursor 键）
+    prev_products = {k: v for k, v in prev.items() if k != "_cursor"}
+
     new_state = {}
     events = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {pool.submit(check_product, h): h for h in handles}
+        futures = {pool.submit(check_product, h): h for h in batch}
         for f in as_completed(futures):
             handle, info = f.result()
             if not info:
@@ -480,7 +523,20 @@ def main():
             # 货号 = handle（URL解码 + 去 -copy 等后缀）
             raw_handle = unquote(info.get("handle", ""))
             product_number = re.sub(r'-copy$|-1$|-2$', '', raw_handle)
-            prev_skus = prev.get(url, {}).get("skus", {})
+            # 上新检测：这个 URL 之前没见过，就是新上架商品
+            is_new = url not in prev_products
+            if is_new:
+                # 上新通知，取第一个 SKU 展示（通常都有货）
+                first_sku = next(iter(cur.keys()), "")
+                sku_image = main_image
+                for s in info["skus"]:
+                    if s.get("variant_id") and s["variant_id"] in variant_images:
+                        sku_image = variant_images[s["variant_id"]]
+                        break
+                events.append({"type": "NEW", "product_name": info["name"], "sku": first_sku, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+                logger.info(f"🆕 上新: {info['name']}")
+                continue
+            prev_skus = prev_products.get(url, {}).get("skus", {})
             for sn, so in cur.items():
                 was = prev_skus.get(sn, False)
                 # 找到这个 SKU 名称对应的 variant_id
@@ -498,15 +554,16 @@ def main():
                     events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"📦 补货: {info['name']} - {sn}")
 
-    logger.info(f"扫描完成: {len(new_state)} 个商品, {sum(len(v['skus']) for v in new_state.values())} 个SKU, {len(events)} 个变化")
+    logger.info(f"本轮扫描完成: {len(new_state)} 个商品, {len(events)} 个变化")
 
     if events:
         notify_events(events)
     else:
         logger.info("本轮无变化")
 
+    new_state["_cursor"] = next_cursor
     save_state(new_state)
-    logger.info("状态已保存")
+    logger.info(f"状态已保存（下一轮从第 {next_cursor} 个开始）")
 
 if __name__ == "__main__":
     main()
