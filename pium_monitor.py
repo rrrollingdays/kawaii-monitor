@@ -7,7 +7,7 @@ piumofficial.com 卖空/补货监控脚本
 - 支持卖空通知 + 补货通知
 - 邮件 + 微信双通道通知
 """
-import sys, os, re, json, smtplib, logging, ssl
+import sys, os, re, json, smtplib, logging, ssl, time
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -50,9 +50,27 @@ def fetch_url(url):
     # Shopify 返回 UTF-8
     return raw.decode("utf-8", errors="replace")
 
+def fetch_url_with_retry(url, retries=3, base_delay=2):
+    """带 429 退避重试的抓取"""
+    for attempt in range(1, retries + 1):
+        try:
+            return fetch_url(url)
+        except HTTPError as e:
+            if e.code == 429 and attempt < retries:
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning(f"429 限流，{delay}s 后重试 ({attempt}/{retries}): {url}")
+                time.sleep(delay)
+                continue
+            raise
+        except Exception:
+            if attempt < retries:
+                time.sleep(base_delay * (2 ** (attempt - 1)))
+                continue
+            raise
+
 def fetch_json(url):
     """抓取 JSON 接口"""
-    text = fetch_url(url)
+    text = fetch_url_with_retry(url)
     return json.loads(text)
 
 # ======================== 商品发现 ========================
@@ -62,7 +80,7 @@ def discover_product_handles():
     for page in range(1, MAX_PAGES + 1):
         url = f"{COLLECTION_URL}?page={page}"
         try:
-            html = fetch_url(url)
+            html = fetch_url_with_retry(url)
             # 匹配 /products/{handle} 链接，去掉 ?variant= 后缀
             found = re.findall(r'href="/products/([^"?"]+)', html)
             if not found:
@@ -77,6 +95,10 @@ def discover_product_handles():
                 break
         except Exception as e:
             logger.warning(f"抓取列表页失败: page={page} → {e}")
+            if page == 1:
+                # 首页失败，本轮数据不可信，返回空列表
+                logger.warning("首页抓取失败，本轮不覆盖状态文件")
+                return []
             break
     logger.info(f"共发现 {len(handles)} 个商品")
     return sorted(handles)
@@ -182,7 +204,7 @@ def parse_product_html(handle, name=None, json_skus=None):
     """
     url = f"{BASE_URL}/products/{handle}"
     try:
-        html = fetch_url(url)
+        html = fetch_url_with_retry(url)
     except Exception as e:
         logger.warning(f"HTML抓取失败: {handle} → {e}")
         return None
@@ -424,6 +446,9 @@ def main():
         return
 
     handles = discover_product_handles()
+    if not handles:
+        logger.warning("未获取到商品列表，本轮跳过，保留旧状态")
+        return
     logger.info(f"pium 监控启动: {len(handles)} 个商品")
 
     prev = load_state()
