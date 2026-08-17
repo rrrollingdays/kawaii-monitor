@@ -20,7 +20,7 @@ from urllib.parse import urlencode, unquote
 BASE_URL = "https://piumofficial.com"
 COLLECTION_URL = "https://piumofficial.com/collections/all-items"
 MAX_PAGES = 20          # 最多扫描的页数
-MAX_WORKERS = 5         # 并发抓取数
+MAX_WORKERS = 2         # 并发抓取数
 REQUEST_TIMEOUT = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
@@ -50,7 +50,7 @@ def fetch_url(url):
     # Shopify 返回 UTF-8
     return raw.decode("utf-8", errors="replace")
 
-def fetch_url_with_retry(url, retries=3, base_delay=2):
+def fetch_url_with_retry(url, retries=4, base_delay=5):
     """带 429 退避重试的抓取"""
     for attempt in range(1, retries + 1):
         try:
