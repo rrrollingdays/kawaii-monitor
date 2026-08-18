@@ -492,8 +492,8 @@ def main():
         next_cursor = 0
     logger.info(f"pium 监控启动: 总 {len(all_handles)} 个，本轮扫 {len(batch)} 个 (从第 {cursor} 个开始)")
 
-    # 上新检测：记录之前见过的所有商品（排除 _cursor 键）
-    prev_products = {k: v for k, v in prev.items() if k != "_cursor"}
+    # 上新检测：维护一个独立的"已见过商品"集合（与分批游标无关）
+    seen_urls = set(prev.get("_seen_urls", []))
 
     new_state = {}
     events = []
@@ -524,7 +524,7 @@ def main():
             raw_handle = unquote(info.get("handle", ""))
             product_number = re.sub(r'-copy$|-1$|-2$', '', raw_handle)
             # 上新检测：这个 URL 之前没见过，就是新上架商品
-            is_new = url not in prev_products
+            is_new = url not in seen_urls
             if is_new:
                 # 上新通知，取第一个 SKU 展示（通常都有货）
                 first_sku = next(iter(cur.keys()), "")
@@ -536,7 +536,7 @@ def main():
                 events.append({"type": "NEW", "product_name": info["name"], "sku": first_sku, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                 logger.info(f"🆕 上新: {info['name']}")
                 continue
-            prev_skus = prev_products.get(url, {}).get("skus", {})
+            prev_skus = prev.get(url, {}).get("skus", {})
             for sn, so in cur.items():
                 was = prev_skus.get(sn, False)
                 # 找到这个 SKU 名称对应的 variant_id
@@ -561,9 +561,12 @@ def main():
     else:
         logger.info("本轮无变化")
 
+    # 更新游标和已见集合
+    seen_urls.update(new_state.keys())
     new_state["_cursor"] = next_cursor
+    new_state["_seen_urls"] = sorted(seen_urls)
     save_state(new_state)
-    logger.info(f"状态已保存（下一轮从第 {next_cursor} 个开始）")
+    logger.info(f"状态已保存（下一轮从第 {next_cursor} 个开始，已记录 {len(seen_urls)} 个商品）")
 
 if __name__ == "__main__":
     main()
