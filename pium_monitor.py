@@ -500,6 +500,9 @@ def main():
         if seen_urls:
             logger.info(f"从旧状态恢复 {len(seen_urls)} 个已见商品")
 
+    # 重建检测：基于实际有 SKU 状态的商品数，而不是 _seen_urls
+    products_with_skus = len([k for k in prev.keys() if not k.startswith("_")])
+
     new_state = {}
     events = []
 
@@ -561,11 +564,11 @@ def main():
 
     logger.info(f"本轮扫描完成: {len(new_state)} 个商品, {len(events)} 个变化")
 
-    # 如果还没完整记录过所有商品，只推上新，不推卖空/补货（避免重建时刷屏）
+    # 如果还没完整记录所有商品的 SKU 状态，只推上新，不推卖空/补货（避免重建时刷屏）
     seen_urls.update(new_state.keys())
-    is_rebuilding = len(seen_urls) < len(all_handles)
+    is_rebuilding = products_with_skus < len(all_handles)
     if is_rebuilding:
-        logger.info(f"状态重建中，本轮不推送卖空/补货（已记录 {len(seen_urls)}/{len(all_handles)} 个商品）")
+        logger.info(f"状态重建中，本轮不推送卖空/补货（已有 SKU 状态 {products_with_skus}/{len(all_handles)} 个商品）")
         new_events = [e for e in events if e["type"] == "NEW"]
         if new_events:
             notify_events(new_events)
