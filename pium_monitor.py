@@ -437,7 +437,7 @@ def _notify_new(events):
         desp += "\n"
     send_email(subject, body)
     send_wechat(title, desp)
-    # ======================== 状态管理 ========================
+# ======================== 状态管理 ========================
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -561,16 +561,28 @@ def main():
 
     logger.info(f"本轮扫描完成: {len(new_state)} 个商品, {len(events)} 个变化")
 
-    if events:
-        notify_events(events)
-    else:
-        logger.info("本轮无变化")
-
-    # 更新游标和已见集合
+    # 如果还没完整记录过所有商品，只推上新，不推卖空/补货（避免重建时刷屏）
     seen_urls.update(new_state.keys())
-    new_state["_cursor"] = next_cursor
-    new_state["_seen_urls"] = sorted(seen_urls)
-    save_state(new_state)
+    is_rebuilding = len(seen_urls) < len(all_handles)
+    if is_rebuilding:
+        logger.info(f"状态重建中，本轮不推送卖空/补货（已记录 {len(seen_urls)}/{len(all_handles)} 个商品）")
+        new_events = [e for e in events if e["type"] == "NEW"]
+        if new_events:
+            notify_events(new_events)
+        else:
+            logger.info("本轮无变化")
+    else:
+        if events:
+            notify_events(events)
+        else:
+            logger.info("本轮无变化")
+
+    # 合并旧状态：保留未扫描商品的 SKU 数据，只更新本轮扫过的
+    final_state = dict(prev)
+    final_state.update(new_state)
+    final_state["_cursor"] = next_cursor
+    final_state["_seen_urls"] = sorted(seen_urls)
+    save_state(final_state)
     logger.info(f"状态已保存（下一轮从第 {next_cursor} 个开始，已记录 {len(seen_urls)} 个商品）")
 
 if __name__ == "__main__":
