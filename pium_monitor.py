@@ -437,7 +437,7 @@ def _notify_new(events):
         desp += "\n"
     send_email(subject, body)
     send_wechat(title, desp)
-# ======================== 状态管理 ========================
+    # ======================== 状态管理 ========================
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -494,6 +494,11 @@ def main():
 
     # 上新检测：维护一个独立的"已见过商品"集合（与分批游标无关）
     seen_urls = set(prev.get("_seen_urls", []))
+    # 双保险：如果 _seen_urls 为空，但 prev 里有旧商品，用旧商品 URL 初始化
+    if not seen_urls:
+        seen_urls = {k for k in prev.keys() if not k.startswith("_")}
+        if seen_urls:
+            logger.info(f"从旧状态恢复 {len(seen_urls)} 个已见商品")
 
     new_state = {}
     events = []
