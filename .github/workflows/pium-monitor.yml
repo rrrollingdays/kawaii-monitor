@@ -1,8 +1,12 @@
 name: Pium Monitor Sold Out
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
+
+concurrency:
+  group: pium-monitor
+  cancel-in-progress: true
 
 jobs:
   monitor:
