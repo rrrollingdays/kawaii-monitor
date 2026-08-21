@@ -506,6 +506,40 @@ def main():
     new_state = {}
     events = []
 
+    # ===== 全局新品检测：立即处理，不受 cursor 影响 =====
+    new_product_urls = {f"{BASE_URL}/products/{h}" for h in all_handles} - seen_urls
+    if new_product_urls:
+        logger.info(f"发现 {len(new_product_urls)} 个新商品链接，立即处理")
+        for url in sorted(new_product_urls)[:30]:  # 每轮最多处理30个，防限流
+            handle = url.split("/")[-1]
+            try:
+                info = parse_product(handle)
+                if not info or not info.get("skus"):
+                    continue
+                cur = {}
+                for s in info["skus"]:
+                    if s.get("sold_out") is not None:
+                        cur[s["name"]] = s["sold_out"]
+                if not cur:
+                    continue
+                new_state[url] = {"name": info["name"], "skus": cur}
+                seen_urls.add(url)
+                # 上新通知
+                first_sku = next(iter(cur.keys()), "")
+                sku_image = info.get("image", "")
+                variant_images = info.get("variant_images", {})
+                for s in info["skus"]:
+                    if s.get("variant_id") and s["variant_id"] in variant_images:
+                        sku_image = variant_images[s["variant_id"]]
+                        break
+                raw_handle = unquote(info.get("handle", ""))
+                product_number = re.sub(r'-copy$|-1$|-2$', '', raw_handle)
+                events.append({"type": "NEW", "product_name": info["name"], "sku": first_sku, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+                logger.info(f"🆕 上新: {info['name']}")
+            except Exception as e:
+                logger.warning(f"新品处理失败: {handle} → {e}")
+
+    # ===== 正常分批扫描（卖空/补货）=====
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {pool.submit(check_product, h): h for h in batch}
         for f in as_completed(futures):
@@ -518,6 +552,9 @@ def main():
                     logger.info(f"抓取失败，保留旧状态: {handle}")
                 continue
             url = info["url"]
+            # 跳过已经在全局新品处理里加过的
+            if url in new_state:
+                continue
             # SKU 状态: {sku_name: sold_out}
             cur = {}
             for s in info["skus"]:
@@ -531,19 +568,6 @@ def main():
             # 货号 = handle（URL解码 + 去 -copy 等后缀）
             raw_handle = unquote(info.get("handle", ""))
             product_number = re.sub(r'-copy$|-1$|-2$', '', raw_handle)
-            # 上新检测：这个 URL 之前没见过，就是新上架商品
-            is_new = url not in seen_urls
-            if is_new:
-                # 上新通知，取第一个 SKU 展示（通常都有货）
-                first_sku = next(iter(cur.keys()), "")
-                sku_image = main_image
-                for s in info["skus"]:
-                    if s.get("variant_id") and s["variant_id"] in variant_images:
-                        sku_image = variant_images[s["variant_id"]]
-                        break
-                events.append({"type": "NEW", "product_name": info["name"], "sku": first_sku, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
-                logger.info(f"🆕 上新: {info['name']}")
-                continue
             prev_skus = prev.get(url, {}).get("skus", {})
             for sn, so in cur.items():
                 was = prev_skus.get(sn, False)
@@ -565,7 +589,6 @@ def main():
     logger.info(f"本轮扫描完成: {len(new_state)} 个商品, {len(events)} 个变化")
 
     # 如果还没完整记录所有商品的 SKU 状态，只推上新，不推卖空/补货（避免重建时刷屏）
-    seen_urls.update(new_state.keys())
     is_rebuilding = products_with_skus < len(all_handles)
     if is_rebuilding:
         logger.info(f"状态重建中，本轮不推送卖空/补货（已有 SKU 状态 {products_with_skus}/{len(all_handles)} 个商品）")
