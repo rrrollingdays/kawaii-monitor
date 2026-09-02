@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 piumofficial.com 卖空/补货/上新监控脚本
-- Shopify 平台，通过 .json 接口获取商品数据
+- Shopify 平台，通过 collection JSON 接口一次性获取全部商品
+- 每轮 3 个请求覆盖全部商品（旧版 107 个请求只覆盖 15%）
 - 通过 variant 的 available 字段判断是否卖空
 - 支持卖空通知 + 补货通知 + 上新通知
 - 邮件 + 微信双通道通知
@@ -11,17 +12,15 @@ import sys, os, re, json, smtplib, logging, ssl, time
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 from urllib.parse import urlencode, unquote
 
 # ======================== 配置 ========================
 BASE_URL = "https://piumofficial.com"
-COLLECTION_URL = "https://piumofficial.com/collections/all-items"
-MAX_PAGES = 20          # 最多扫描的页数
-MAX_WORKERS = 2         # 并发抓取数（调低防限流）
-MAX_PER_RUN = 100       # 每轮最多扫描的商品数（分批防限流）
+COLLECTION_JSON_URL = "https://piumofficial.com/collections/all-items/products.json"
+PAGE_SIZE = 250        # Shopify 单页最大值
+MAX_PAGES = 5          # 最多翻 5 页（1250 个商品，足够）
 REQUEST_TIMEOUT = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
@@ -38,20 +37,20 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("pium-monitor")
+
 # ======================== 网络请求 ========================
 def fetch_url(url):
     """抓取 URL 返回文本"""
     req = Request(url, headers={
         "User-Agent": USER_AGENT,
         "Accept-Language": "ja,en;q=0.9",
-        "Accept": "text/html,application/json,*/*"
+        "Accept": "application/json,*/*"
     })
     with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
         raw = resp.read()
-    # Shopify 返回 UTF-8
     return raw.decode("utf-8", errors="replace")
 
-def fetch_url_with_retry(url, retries=4, base_delay=5):
+def fetch_url_with_retry(url, retries=3, base_delay=2):
     """带 429 退避重试的抓取"""
     for attempt in range(1, retries + 1):
         try:
@@ -74,244 +73,41 @@ def fetch_json(url):
     text = fetch_url_with_retry(url)
     return json.loads(text)
 
-# ======================== 商品发现 ========================
-def discover_product_handles():
-    """从 all-items 集合页发现所有商品 handle"""
-    handles = set()
+def clean_img_url(src):
+    """清理图片 URL：确保 https、清理 HTML 实体"""
+    if not src:
+        return ""
+    if src.startswith("//"):
+        src = "https:" + src
+    elif src.startswith("http://"):
+        src = "https://" + src[7:]
+    return src.replace("&", "&").split("&width")[0].split("?width")[0]
+
+# ======================== 商品获取 ========================
+def fetch_all_products():
+    """
+    用 collection JSON 接口一次性获取全部商品（含 SKU 卖空状态）
+    每页 250 个，669 个商品只需 3 个请求
+    """
+    products = []
     for page in range(1, MAX_PAGES + 1):
-        url = f"{COLLECTION_URL}?page={page}"
+        url = f"{COLLECTION_JSON_URL}?limit={PAGE_SIZE}&page={page}"
         try:
-            html = fetch_url_with_retry(url)
-            # 匹配 /products/{handle} 链接，去掉 ?variant= 后缀
-            found = re.findall(r'href="/products/([^"?"]+)', html)
-            if not found:
-                logger.info(f"第 {page} 页无商品，停止翻页")
-                break
-            before = len(handles)
-            handles.update(found)
-            added = len(handles) - before
-            logger.info(f"第 {page} 页: 发现 {added} 个新商品 (累计 {len(handles)})")
-            # 如果本页没有新增，说明到最后一页了
-            if added == 0 and page > 1:
-                break
+            data = fetch_json(url)
         except Exception as e:
-            logger.warning(f"抓取列表页失败: page={page} → {e}")
+            logger.warning(f"列表第 {page} 页抓取失败: {e}")
             if page == 1:
-                # 首页失败，本轮数据不可信，返回空列表
-                logger.warning("首页抓取失败，本轮不覆盖状态文件")
-                return []
+                # 首页失败，本轮数据不可信，作废
+                raise
+            break  # 中间页失败，用已拿到的部分（不会误报）
+        prods = data.get("products", [])
+        if not prods:
             break
-    logger.info(f"共发现 {len(handles)} 个商品")
-    return sorted(handles)
-
-# ======================== 商品解析 ========================
-def parse_product(handle):
-    """
-    通过 Shopify .json 接口获取商品信息
-    返回: {name, handle, url, skus: [{name, sold_out}]}
-    """
-    json_url = f"{BASE_URL}/products/{handle}.json"
-    try:
-        data = fetch_json(json_url)
-    except Exception as e:
-        logger.warning(f"JSON抓取失败: {handle} → {e}")
-        # 退回到 HTML 解析
-        return parse_product_html(handle)
-
-    product = data.get("product", {})
-    if not product:
-        return parse_product_html(handle)
-
-    name = product.get("title", handle)
-    variants = product.get("variants", [])
-
-    # 如果 JSON 没有 available 字段，需要从 HTML 获取
-    skus = []
-    need_html = True
-    for v in variants:
-        vtitle = v.get("title", "")
-        available = v.get("available", None)
-        if available is not None:
-            need_html = False
-        skus.append({
-            "name": vtitle,
-            "variant_id": v.get("id", ""),
-            "sold_out": not available if available is not None else None
-        })
-
-    if need_html:
-        # JSON 不含 available，从 HTML form 解析
-        return parse_product_html(handle, name, skus)
-
-    # 提取商品主图
-    image = ""
-    images = product.get("images", [])
-    if images:
-        image = images[0].get("src", "")
-        if image:
-            if image.startswith("//"):
-                image = "https:" + image
-            elif image.startswith("http://"):
-                image = "https://" + image[7:]
-            image = image.replace("&", "&").split("&width")[0].split("?width")[0]
-
-    # 提取每个 variant 对应的图片
-    # Shopify images 里有 variant_ids 字段关联 variant
-    # 如果没有 variant_ids，用 alt 字段里的 "カラー：xxx" 匹配
-    variant_images = {}
-    for img in images:
-        src = img.get("src", "")
-        if not src:
-            continue
-        # 修正 URL：确保 https，清理 HTML 实体
-        if src.startswith("//"):
-            src = "https:" + src
-        elif src.startswith("http://"):
-            src = "https://" + src[7:]
-        src = src.replace("&", "&").split("&width")[0].split("?width")[0]
-        vids = img.get("variant_ids", [])
-        alt = img.get("alt", "") or ""
-        # 优先用 variant_ids 关联
-        for vid in vids:
-            if vid and src and vid not in variant_images:
-                variant_images[vid] = src
-        # 如果没有 variant_ids，用 alt 里的颜色名匹配
-        if not vids and alt:
-            alt_match = re.search(r'カラー[：:\s]*(.+)', alt)
-            if alt_match:
-                color = alt_match.group(1).strip()
-                for s in skus:
-                    sname = s.get("name", "")
-                    # variant name 通常是 "ピンク / Free" 格式，取第一部分
-                    color_part = sname.split("/")[0].strip() if "/" in sname else sname
-                    if color_part == color and s["variant_id"] not in variant_images:
-                        variant_images[s["variant_id"]] = src
-
-    return {
-        "name": name,
-        "handle": handle,
-        "url": f"{BASE_URL}/products/{handle}",
-        "image": image,
-        "variant_images": variant_images,
-        "skus": skus
-    }
-
-def parse_product_html(handle, name=None, json_skus=None):
-    """
-    从商品详情页 HTML 解析 SKU 卖空状态
-    Shopify 的 wl-variant-list 中，每个 variant 有一个 form:
-    - 有 BIS_trigger / Sold Out = 卖空
-    - 有 カートに入れる = 有货
-    """
-    url = f"{BASE_URL}/products/{handle}"
-    try:
-        html = fetch_url_with_retry(url)
-    except Exception as e:
-        logger.warning(f"HTML抓取失败: {handle} → {e}")
-        return None
-
-    if not name:
-        m = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL)
-        name = m.group(1).strip() if m else handle
-
-    # 获取 variant title → variant_id 映射（来自 JSON 或 HTML input）
-    vid_map = {}
-    if json_skus:
-        for s in json_skus:
-            vid_map[s["variant_id"]] = s["name"]
-    else:
-        for m in re.finditer(r'data-variant-id="(\d+)"[^>]*data-option-value="([^"]*)"', html):
-            vid_map[m.group(1)] = m.group(2)
-        # 也尝试反向匹配
-        if not vid_map:
-            for m in re.finditer(r'data-option-value="([^"]*)"[^>]*data-variant-id="(\d+)"', html):
-                vid_map[m.group(2)] = m.group(1)
-
-    # 解析每个 variant form 的卖空状态
-    # 每个包含 value="{vid}" 的 form 代表一个 variant
-    skus = []
-    forms = re.findall(r'<form[^>]*action="/cart/add"[^>]*>.*?</form>', html, re.DOTALL)
-
-    if forms:
-        for form_html in forms:
-            vid_m = re.search(r'value="(\d+)"', form_html)
-            title_m = re.search(r'<p>([^<]*)</p>', form_html)
-            vid = vid_m.group(1) if vid_m else ""
-            title = title_m.group(1).strip() if title_m else vid_map.get(vid, "")
-            has_bis = "BIS_trigger" in form_html
-            has_soldout = "Sold Out" in form_html or "sold-out" in form_html.lower()
-            has_cart = "カートに入れる" in form_html or "cart" in form_html.lower()
-            sold_out = has_bis or (has_soldout and not has_cart)
-            skus.append({"name": title, "variant_id": vid, "sold_out": sold_out})
-    else:
-        # 如果没找到 form，尝试从 color-swatch 的 data-variant-inventory 判断
-        for m in re.finditer(r'data-variant-id="(\d+)"[^>]*?data-option-value="([^"]*)"', html, re.DOTALL):
-            vid, title = m.group(1), m.group(2)
-            # 检查附近是否有 sold-out class
-            ctx_start = m.start()
-            ctx_end = min(len(html), m.end() + 500)
-            ctx = html[ctx_start:ctx_end]
-            sold_out = "sold-out" in ctx.lower() or "Sold Out" in ctx
-            skus.append({"name": title, "variant_id": vid, "sold_out": sold_out})
-
-    # 如果还是没找到，使用 JSON 的 variant 列表但标记为未知
-    if not skus and json_skus:
-        skus = json_skus
-
-    # 提取商品主图（og:image 或第一张图片）
-    image = ""
-    og_m = re.search(r'<meta[^>]*property=\"og:image\"[^>]*content=\"([^\"]+)\"', html)
-    if og_m:
-        image = og_m.group(1)
-    else:
-        img_m = re.search(r'<img[^>]*class=\"[^\"]*product-image[^\"]*\"[^>]*src=\"([^\"]+)\"', html)
-        if img_m:
-            image = img_m.group(1)
-    if image:
-        if image.startswith("//"):
-            image = "https:" + image
-        elif image.startswith("http://"):
-            image = "https://" + image[7:]
-        image = image.replace("&", "&").split("&width")[0].split("?width")[0]
-
-    # 提取每个 variant 对应的图片
-    variant_images = {}
-    # 从 HTML 中找 data-variant-id 和对应的图片
-    for m in re.finditer(r'data-variant-id="(\d+)"[^>]*?(?:data-image[^>]*?src="([^"]+)"|src="([^"]+)"[^>]*?data-variant-id)', html, re.DOTALL):
-        vid = m.group(1)
-        src = m.group(2) or m.group(3) or ""
-        if src:
-            if src.startswith("//"):
-                src = "https:" + src
-            elif src.startswith("http://"):
-                src = "https://" + src[7:]
-            src = src.replace("&", "&").split("&width")[0].split("?width")[0]
-        if vid and src and vid not in variant_images:
-            variant_images[vid] = src
-    # 也尝试从 alt 属性匹配
-    for m in re.finditer(r'<img[^>]*src="([^"]+)"[^>]*alt="カラー[：:\s]*([^"]+)"', html):
-        src = m.group(1)
-        if src:
-            if src.startswith("//"):
-                src = "https:" + src
-            elif src.startswith("http://"):
-                src = "https://" + src[7:]
-            src = src.replace("&", "&").split("&width")[0].split("?width")[0]
-        color = m.group(2).strip()
-        for s in skus:
-            sname = s.get("name", "")
-            color_part = sname.split("/")[0].strip() if "/" in sname else sname
-            if color_part == color and s.get("variant_id") and s["variant_id"] not in variant_images:
-                variant_images[s["variant_id"]] = src
-
-    return {
-        "name": name,
-        "handle": handle,
-        "url": url,
-        "image": image,
-        "variant_images": variant_images,
-        "skus": skus
-    }
+        products.extend(prods)
+        logger.info(f"第 {page} 页: {len(prods)} 个商品 (累计 {len(products)})")
+        if len(prods) < PAGE_SIZE:
+            break
+    return products
 # ======================== 通知 ========================
 def send_email(subject, body_html):
     if not SMTP_USER or not SMTP_PASSWORD or not EMAIL_TO:
@@ -455,44 +251,28 @@ def save_state(state):
         pass
 
 # ======================== 主逻辑 ========================
-def check_product(handle):
-    """抓取单个商品的 SKU 状态"""
-    try:
-        return handle, parse_product(handle)
-    except Exception as e:
-        logger.warning(f"抓取失败: {handle} → {e}")
-        return handle, None
-
 def main():
     if "--test-notify" in sys.argv:
         notify_events([
             {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "sku": "グレー / Free", "number": "1026a070301181", "url": "https://piumofficial.com/products/test", "time": datetime.now().isoformat()},
             {"type": "RESTOCK", "product_name": "【测试-补货】", "sku": "ブラック / Free", "number": "1026a070301181", "url": "https://piumofficial.com/products/test", "time": datetime.now().isoformat()},
+            {"type": "NEW", "product_name": "【测试-上新】", "sku": "ピンク / Free", "number": "1026a070301181", "url": "https://piumofficial.com/products/test", "time": datetime.now().isoformat()},
         ])
         return
 
-    handles = discover_product_handles()
-    if not handles:
+    # 一次拿全部商品（含 SKU 卖空状态）
+    try:
+        products = fetch_all_products()
+    except Exception as e:
+        logger.warning(f"获取商品列表失败: {e}，本轮跳过，保留旧状态")
+        return
+    if not products:
         logger.warning("未获取到商品列表，本轮跳过，保留旧状态")
         return
 
-    # 分批扫描：每轮只扫一部分，从上次停下的位置继续
     prev = load_state()
-    # 找出所有商品，按顺序排队
-    all_handles = sorted(handles)
-    # 用状态文件记录的"上次起点"决定本轮从哪开始
-    cursor = prev.get("_cursor", 0)
-    if cursor >= len(all_handles):
-        cursor = 0
-    # 本轮要扫的这一批
-    batch = all_handles[cursor:cursor + MAX_PER_RUN]
-    # 更新游标，供下一轮用
-    next_cursor = cursor + len(batch)
-    if next_cursor >= len(all_handles):
-        next_cursor = 0
-    logger.info(f"pium 监控启动: 总 {len(all_handles)} 个，本轮扫 {len(batch)} 个 (从第 {cursor} 个开始)")
 
-    # 上新检测：维护一个独立的"已见过商品"集合（与分批游标无关）
+    # 上新检测：维护一个独立的"已见过商品"集合
     seen_urls = set(prev.get("_seen_urls", []))
     # 双保险：如果 _seen_urls 为空，但 prev 里有旧商品，用旧商品 URL 初始化
     if not seen_urls:
@@ -500,116 +280,93 @@ def main():
         if seen_urls:
             logger.info(f"从旧状态恢复 {len(seen_urls)} 个已见商品")
 
-    # 重建检测：基于实际有 SKU 状态的商品数，而不是 _seen_urls
+    # 首次运行判断：没有任何商品的 SKU 状态 → 建基线，不发通知
     products_with_skus = len([k for k in prev.keys() if not k.startswith("_")])
+    first_run = products_with_skus == 0
+    if first_run:
+        logger.info("首次运行：建立基线状态，本轮不发通知")
+    else:
+        logger.info(f"pium 监控启动: 本轮全量扫描 {len(products)} 个商品 (已有状态 {products_with_skus} 个)")
 
     new_state = {}
     events = []
 
-    # ===== 全局新品检测：立即处理，不受 cursor 影响 =====
-    new_product_urls = {f"{BASE_URL}/products/{h}" for h in all_handles} - seen_urls
-    if new_product_urls:
-        logger.info(f"发现 {len(new_product_urls)} 个新商品链接，立即处理")
-        for url in sorted(new_product_urls)[:30]:  # 每轮最多处理30个，防限流
-            handle = url.split("/")[-1]
-            try:
-                info = parse_product(handle)
-                if not info or not info.get("skus"):
-                    continue
-                cur = {}
-                for s in info["skus"]:
-                    if s.get("sold_out") is not None:
-                        cur[s["name"]] = s["sold_out"]
-                if not cur:
-                    continue
-                new_state[url] = {"name": info["name"], "skus": cur}
-                seen_urls.add(url)
-                # 上新通知
-                first_sku = next(iter(cur.keys()), "")
-                sku_image = info.get("image", "")
-                variant_images = info.get("variant_images", {})
-                for s in info["skus"]:
-                    if s.get("variant_id") and s["variant_id"] in variant_images:
-                        sku_image = variant_images[s["variant_id"]]
-                        break
-                raw_handle = unquote(info.get("handle", ""))
-                product_number = re.sub(r'-copy$|-1$|-2$', '', raw_handle)
-                events.append({"type": "NEW", "product_name": info["name"], "sku": first_sku, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
-                logger.info(f"🆕 上新: {info['name']}")
-            except Exception as e:
-                logger.warning(f"新品处理失败: {handle} → {e}")
+    for p in products:
+        handle = p.get("handle", "")
+        if not handle:
+            continue
+        url = f"{BASE_URL}/products/{handle}"
 
-    # ===== 正常分批扫描（卖空/补货）=====
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {pool.submit(check_product, h): h for h in batch}
-        for f in as_completed(futures):
-            handle, info = f.result()
-            if not info:
-                # 抓取失败，保留旧状态
-                url = f"{BASE_URL}/products/{handle}"
-                if url in prev:
-                    new_state[url] = prev[url]
-                    logger.info(f"抓取失败，保留旧状态: {handle}")
+        # 解析全部 SKU 状态（JSON 的 available 字段）
+        variants = p.get("variants", [])
+        cur = {}
+        img_by_name = {}
+        for v in variants:
+            vname = v.get("title") or v.get("option1") or str(v.get("id", ""))
+            if not vname:
                 continue
-            url = info["url"]
-            # 跳过已经在全局新品处理里加过的
-            if url in new_state:
-                continue
-            # SKU 状态: {sku_name: sold_out}
-            cur = {}
-            for s in info["skus"]:
-                if s.get("sold_out") is not None:
-                    cur[s["name"]] = s["sold_out"]
-            if not cur:
-                continue
-            new_state[url] = {"name": info["name"], "skus": cur}
-            variant_images = info.get("variant_images", {})
-            main_image = info.get("image", "")
-            # 货号 = handle（URL解码 + 去 -copy 等后缀）
-            raw_handle = unquote(info.get("handle", ""))
-            product_number = re.sub(r'-copy$|-1$|-2$', '', raw_handle)
+            if "available" in v:
+                cur[vname] = not v["available"]
+            fi = v.get("featured_image") or {}
+            src = clean_img_url(fi.get("src", ""))
+            if src:
+                img_by_name[vname] = src
+        if not cur:
+            continue
+
+        name = p.get("title", handle)
+        new_state[url] = {"name": name, "skus": cur}
+
+        # 主图
+        images = p.get("images", [])
+        main_image = clean_img_url(images[0].get("src", "")) if images else ""
+        # 货号 = handle（URL解码 + 去 -copy 等后缀）
+        raw_handle = unquote(handle)
+        product_number = re.sub(r'-copy$|-1$|-2$', '', raw_handle)
+
+        is_new = url not in seen_urls
+        if is_new:
+            seen_urls.add(url)
+
+        # 首轮建基线：只记录状态，不做事件检测
+        if first_run:
+            continue
+
+        if is_new:
+            # ===== 上新 =====
+            first_sku = next(iter(cur.keys()), "")
+            sku_image = img_by_name.get(first_sku, "") or main_image
+            events.append({"type": "NEW", "product_name": name, "sku": first_sku, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+            logger.info(f"🆕 上新: {name}")
+        else:
+            # ===== 卖空/补货对比 =====
             prev_skus = prev.get(url, {}).get("skus", {})
             for sn, so in cur.items():
                 was = prev_skus.get(sn, False)
-                # 找到这个 SKU 名称对应的 variant_id
-                sku_image = main_image
-                for s in info["skus"]:
-                    if s["name"] == sn and s.get("variant_id"):
-                        vid = s["variant_id"]
-                        if vid in variant_images:
-                            sku_image = variant_images[vid]
-                        break
+                sku_image = img_by_name.get(sn, "") or main_image
                 if so and not was:
-                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
-                    logger.info(f"🚨 卖空: {info['name']} - {sn}")
+                    events.append({"type": "SOLD_OUT", "product_name": name, "sku": sn, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+                    logger.info(f"🚨 卖空: {name} - {sn}")
                 elif not so and was:
-                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
-                    logger.info(f"📦 补货: {info['name']} - {sn}")
+                    events.append({"type": "RESTOCK", "product_name": name, "sku": sn, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+                    logger.info(f"📦 补货: {name} - {sn}")
 
     logger.info(f"本轮扫描完成: {len(new_state)} 个商品, {len(events)} 个变化")
 
-    # 如果还没完整记录所有商品的 SKU 状态，只推上新，不推卖空/补货（避免重建时刷屏）
-    is_rebuilding = products_with_skus < len(all_handles)
-    if is_rebuilding:
-        logger.info(f"状态重建中，本轮不推送卖空/补货（已有 SKU 状态 {products_with_skus}/{len(all_handles)} 个商品）")
-        new_events = [e for e in events if e["type"] == "NEW"]
-        if new_events:
-            notify_events(new_events)
-        else:
-            logger.info("本轮无变化")
+    if first_run:
+        logger.info(f"基线建立完成: {len(new_state)} 个商品已记录，下一轮开始正常监控")
+    elif events:
+        notify_events(events)
     else:
-        if events:
-            notify_events(events)
-        else:
-            logger.info("本轮无变化")
+        logger.info("本轮无变化")
 
-    # 合并旧状态：保留未扫描商品的 SKU 数据，只更新本轮扫过的
+    # 合并旧状态（保留 JSON 异常商品和已下架商品的旧数据，防止误报）
     final_state = dict(prev)
     final_state.update(new_state)
-    final_state["_cursor"] = next_cursor
+    final_state.pop("_cursor", None)  # 旧版遗留字段，不再需要
     final_state["_seen_urls"] = sorted(seen_urls)
     save_state(final_state)
-    logger.info(f"状态已保存（下一轮从第 {next_cursor} 个开始，已记录 {len(seen_urls)} 个商品）")
+    logger.info(f"状态已保存（已记录 {len(seen_urls)} 个商品）")
 
 if __name__ == "__main__":
     main()
