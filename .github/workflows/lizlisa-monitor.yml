@@ -2,8 +2,12 @@ name: LIZLISA Monitor Sold Out
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
+
+concurrency:
+  group: lizlisa-monitor
+  cancel-in-progress: true
 
 jobs:
   monitor:
