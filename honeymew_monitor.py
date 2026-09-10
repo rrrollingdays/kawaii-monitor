@@ -40,6 +40,7 @@ SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "")
 SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY", "")
+BARK_URL = os.environ.get("BARK_URL", "").rstrip("/")
 STATE_FILE = os.environ.get("STATE_FILE", "/tmp/honeymew_state.json")
 
 logging.basicConfig(
@@ -110,7 +111,6 @@ def fetch_all_products():
             break
         start += PAGE_LIMIT
     return all_products
-
 def parse_record(p):
     """
     解析一条颜色记录
@@ -211,6 +211,25 @@ def send_wechat(title, desp):
         logger.error(f"微信推送失败: {e}")
     return False
 
+def send_bark(title, desp):
+    if not BARK_URL:
+        logger.warning("Bark 未配置，跳过")
+        return False
+    text = re.sub(r"<[^>]+>", "", desp)
+    text = text.replace("**", "").replace("### ", "")[:900]
+    payload = {"title": title[:60], "body": text, "group": "kawaii-monitor", "level": "timeSensitive"}
+    try:
+        req = Request(BARK_URL, data=json.dumps(payload).encode("utf-8"),
+                      headers={"Content-Type": "application/json; charset=utf-8"})
+        with urlopen(req, timeout=10) as resp:
+            r = json.loads(resp.read().decode("utf-8"))
+            if r.get("code") == 200:
+                logger.info(f"Bark 推送已发送: {title}")
+                return True
+            logger.error(f"Bark 推送失败: {r.get('message')}")
+    except Exception as e:
+        logger.error(f"Bark 推送失败: {e}")
+    return False
 def notify_events(events):
     if not events:
         return
@@ -245,6 +264,7 @@ def _notify_soldout(events):
         desp += "\n"
     send_email(subject, body)
     send_wechat(title, desp)
+    send_bark(title, desp)
 
 def _notify_restock(events):
     if len(events) == 1:
@@ -267,6 +287,7 @@ def _notify_restock(events):
         desp += "\n"
     send_email(subject, body)
     send_wechat(title, desp)
+    send_bark(title, desp)
 
 def _notify_new(events):
     if len(events) == 1:
@@ -289,6 +310,7 @@ def _notify_new(events):
         desp += "\n"
     send_email(subject, body)
     send_wechat(title, desp)
+    send_bark(title, desp)
 # ======================== 状态管理 ========================
 def load_state():
     if os.path.exists(STATE_FILE):
