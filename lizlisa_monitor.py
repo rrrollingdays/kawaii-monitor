@@ -45,10 +45,14 @@ logger = logging.getLogger("monitor")
 
 # ======================== 通知 ========================
 def send_email(subject, body_html):
-    if not SMTP_USER or not SMTP_PASSWORD or not EMAIL_TO:
+    recipients = [x.strip() for x in EMAIL_TO.split(",") if x.strip()]
+    if not SMTP_USER or not SMTP_PASSWORD or not recipients:
+        logger.warning("邮件配置不完整，跳过")
         return False
     msg = MIMEMultipart("alternative")
-    msg["From"] = SMTP_USER; msg["To"] = EMAIL_TO; msg["Subject"] = subject
+    msg["From"] = SMTP_USER
+    msg["To"] = ", ".join(recipients)
+    msg["Subject"] = subject
     msg.attach(MIMEText(re.sub(r'<[^>]+>', '', body_html), "plain", "utf-8"))
     msg.attach(MIMEText(body_html, "html", "utf-8"))
     ctx = ssl.create_default_context()
@@ -58,17 +62,18 @@ def send_email(subject, body_html):
                 with smtplib.SMTP(SMTP_SERVER, 587, timeout=15) as s:
                     s.ehlo(); s.starttls(context=ctx); s.ehlo()
                     s.login(SMTP_USER, SMTP_PASSWORD)
-                    s.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
+                    s.sendmail(SMTP_USER, recipients, msg.as_string())
             else:
                 with smtplib.SMTP_SSL(SMTP_SERVER, 465, context=ctx, timeout=15) as s:
                     s.login(SMTP_USER, SMTP_PASSWORD)
-                    s.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
+                    s.sendmail(SMTP_USER, recipients, msg.as_string())
             logger.info(f"邮件已发送: {subject}")
             return True
         except Exception as e:
             logger.debug(f"端口{port}失败: {e}")
     logger.error("邮件发送失败")
     return False
+
 
 def send_wechat(title, desp):
     if not SERVERCHAN_KEY:
