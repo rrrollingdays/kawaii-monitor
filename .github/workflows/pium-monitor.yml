@@ -24,6 +24,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          BARK_URL: ${{ secrets.BARK_URL }}
           STATE_FILE: pium_state.json
         run: python pium_monitor.py --once
 
