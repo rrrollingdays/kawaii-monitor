@@ -1,0 +1,20 @@
+name: Test Notify
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Send test notifications
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+          STATE_FILE: /tmp/test_state.json
+        run: python pium_monitor.py --test-notify
