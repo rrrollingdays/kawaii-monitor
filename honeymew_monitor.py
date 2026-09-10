@@ -215,9 +215,13 @@ def send_bark(title, desp):
     if not BARK_URL:
         logger.warning("Bark 未配置，跳过")
         return False
+    m = re.search(r'src="([^"]+)"', desp)
+    image_url = m.group(1) if m else ""
     text = re.sub(r"<[^>]+>", "", desp)
     text = text.replace("**", "").replace("### ", "")[:900]
     payload = {"title": title[:60], "body": text, "group": "kawaii-monitor", "level": "timeSensitive"}
+    if image_url:
+        payload["image"] = image_url
     try:
         req = Request(BARK_URL, data=json.dumps(payload).encode("utf-8"),
                       headers={"Content-Type": "application/json; charset=utf-8"})
@@ -230,6 +234,7 @@ def send_bark(title, desp):
     except Exception as e:
         logger.error(f"Bark 推送失败: {e}")
     return False
+
 def notify_events(events):
     if not events:
         return
