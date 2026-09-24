@@ -17,6 +17,4 @@ jobs:
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           BARK_URL: ${{ secrets.BARK_URL }}
           STATE_FILE: /tmp/test_state.json
-        run: |
-          python pium_monitor.py --test-notify
-          python bubbles_monitor.py --test-notify
+        run: python pium_monitor.py --test-notify
