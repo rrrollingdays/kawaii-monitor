@@ -150,23 +150,28 @@ def parse_item_page(html):
         size = dt_text.split("/")[0].strip() if "/" in dt_text else ""
         # 预约（予約）状态也算 OK（可以下单）；仅"在庫なし"才算卖空
         skus[sku_m.group(1)] = {"variant": cur_color, "size": size, "state": state}
-    return skus
+    # 商品级价格（税抜，服务端渲染的隐藏字段，打折时同步变化）
+    goods_price = 0
+    pm = re.search(r'name="parteGoodsSalePrice"\s+value="(\d+)"', html)
+    if pm:
+        goods_price = int(pm.group(1))
+    return skus, goods_price
 
 def fetch_item_state(gid):
-    """抓单商品详情页并解析。返回 (skus, ok)"""
+    """抓单商品详情页并解析。返回 (skus, goods_price, ok)"""
     try:
         html = fetch_url_with_retry(f"{BASE_URL}/display/item/{gid}/")
     except HTTPError as e:
         logger.warning(f"详情页 HTTP {e.code}: {gid}")
-        return None, False
+        return None, 0, False
     except Exception as e:
         logger.warning(f"详情页抓取失败: {gid} {e}")
-        return None, False
-    skus = parse_item_page(html)
+        return None, 0, False
+    skus, goods_price = parse_item_page(html)
     if not skus:
         logger.warning(f"详情页解析为空（结构变化或被拦截）: {gid}")
-        return None, False
-    return skus, True
+        return None, 0, False
+    return skus, goods_price, True
 
 # ======================== 通知 ========================
 def send_email(subject, body_html):
@@ -256,6 +261,29 @@ def _event_desp(events):
         desp += "\n"
     return desp
 
+def _notify_sale(events):
+    if len(events) == 1:
+        e = events[0]
+        subject = f"💰 [olive] 折扣: {e['product_name']} -{e['discount']}"
+        title = f"[olive]折扣:{e['product_name'][:15]} -{e['discount']}"
+    else:
+        subject = f"💰 [olive] {len(events)} 个商品限时折扣"
+        title = f"[olive]{len(events)}个折扣"
+    rows = ""
+    for e in events:
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#c0392b;font-weight:bold;">¥{e["new_price"]:,}（-{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#c0392b;">💰 [OLIVE des OLIVE] 限时折扣</h2><p>{len(events)} 个商品降价:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
+    desp = "### [olive] 限时折扣\n\n"
+    for e in events:
+        desp += f"**{e['product_name']}**\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（-{e['discount']}）\n- [查看商品]({e['url']})\n"
+        if e.get("image"):
+            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
+        desp += "\n"
+    send_email(subject, body)
+    send_wechat(title, desp)
+    send_bark(title, desp)
+
 def _notify_soldout(events):
     if len(events) == 1:
         e = events[0]
@@ -304,8 +332,11 @@ def notify_events(events):
     soldout = [e for e in events if e["type"] == "SOLD_OUT"]
     restock = [e for e in events if e["type"] == "RESTOCK"]
     new = [e for e in events if e["type"] == "NEW"]
+    sale = [e for e in events if e["type"] == "SALE"]
     if new:
         _notify_new(new)
+    if sale:
+        _notify_sale(sale)
     if soldout:
         _notify_soldout(soldout)
     if restock:
@@ -359,11 +390,12 @@ def main():
 
     events = []
     new_goods_state = {}
+    new_prices = {}
     failed = 0
 
     for gid in targets:
         info = list_goods.get(gid) or prev_goods.get(gid, {})
-        skus, ok = fetch_item_state(gid)
+        skus, goods_price, ok = fetch_item_state(gid)
         if not ok:
             # 失败处理：连续失败达阈值 → 静默下架；否则沿用旧状态
             fail_count[gid] = fail_count.get(gid, 0) + 1
@@ -379,6 +411,7 @@ def main():
             continue
 
         fail_count.pop(gid, None)
+        new_prices[gid] = goods_price
         name = info.get("name", "")
         image = info.get("image", "")
         url = info.get("url", f"{BASE_URL}/display/item/{gid}/")
@@ -415,6 +448,14 @@ def main():
                                    "number": gid, "url": url, "image": image,
                                    "time": datetime.now().isoformat()})
                     logger.info(f"🚨 卖空: {name} - {label}")
+
+            # ===== 折扣检测（商品级价格下降）=====
+            old_price = prev.get("_prices", {}).get(gid, 0)
+            if goods_price and old_price and goods_price < old_price:
+                discount = round((1 - goods_price / old_price) * 100)
+                if discount >= 2:
+                    events.append({"type": "SALE", "product_name": name, "sku": "全色", "number": gid, "url": url, "image": image, "new_price": goods_price, "discount": f"{discount}%", "compare_txt": f"¥{old_price:,} →", "time": datetime.now().isoformat()})
+                    logger.info(f"💰 折扣: {name} ¥{old_price:,}→¥{goods_price:,}")
             new_goods_state[gid] = {"name": name, "image": image, "url": url, "skus": skus}
 
         time.sleep(ITEM_DELAY)
@@ -438,6 +479,7 @@ def main():
         "_goods": new_goods_state,
         "_seen_goods": sorted(seen_goods),
         "_fail_count": fail_count,
+        "_prices": new_prices,
     })
     logger.info(f"状态已保存（{len(seen_goods)} 个商品）")
 
