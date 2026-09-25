@@ -111,11 +111,14 @@ def notify_events(events):
     soldout_events = [e for e in events if e["type"] == "SOLD_OUT"]
     restock_events = [e for e in events if e["type"] == "RESTOCK"]
     new_events = [e for e in events if e["type"] == "NEW"]
+    sale_events = [e for e in events if e["type"] == "SALE"]
+    priceup_events = [e for e in events if e["type"] == "PRICE_UP"]
     if new_events:
         _notify_new(new_events)
-    sale_events = [e for e in events if e["type"] == "SALE"]
     if sale_events:
         _notify_sale(sale_events)
+    if priceup_events:
+        _notify_priceup(priceup_events)
     if soldout_events:
         _notify_soldout(soldout_events)
     if restock_events:
@@ -137,6 +140,29 @@ def _notify_sale(events):
     desp = "### [lizlisa] 限时折扣\n\n"
     for e in events:
         desp += f"**{e['product_name']}**\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（-{e['discount']}）\n- [查看商品]({e['url']})\n"
+        if e.get("image"):
+            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
+        desp += "\n"
+    send_email(subject, body)
+    send_wechat(title, desp)
+    send_bark(title, desp)
+
+def _notify_priceup(events):
+    if len(events) == 1:
+        e = events[0]
+        subject = f"📈 [lizlisa] 回调: {e['product_name']} +{e['discount']}"
+        title = f"[lizlisa]回调:{e['product_name'][:15]} +{e['discount']}"
+    else:
+        subject = f"📈 [lizlisa] {len(events)} 个商品价格回调"
+        title = f"[lizlisa]{len(events)}个回调"
+    rows = ""
+    for e in events:
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">¥{e["new_price"]:,}（+{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#27ae60;">📈 [lizlisa] 价格回调</h2><p>{len(events)} 个商品涨价:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
+    desp = "### [lizlisa] 价格回调\n\n"
+    for e in events:
+        desp += f"**{e['product_name']}**\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（+{e['discount']}）\n- [查看商品]({e['url']})\n"
         if e.get("image"):
             desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
         desp += "\n"
@@ -440,16 +466,24 @@ def main():
                 pi = info.get("price_info", {})
                 new_price, compare = pi.get("price", 0), pi.get("compare", 0)
                 old_price = prev.get("_prices", {}).get(url, {}).get("price", 0)
-                if new_price and old_price and new_price < old_price:
-                    if compare and compare > new_price:
-                        base_price, compare_txt = compare, f"~~¥{compare:,}~~ →"
+                if new_price and old_price and new_price != old_price:
+                    if new_price > old_price:
+                        # ===== 价格回调检测（涨价 >=2% 触发）=====
+                        rise = round((new_price / old_price - 1) * 100)
+                        if rise >= 2:
+                            sku_image = info.get("image", "")
+                            events.append({"type": "PRICE_UP", "product_name": info["name"], "sku": "全色", "number": info.get("number", ""), "url": url, "image": sku_image, "new_price": new_price, "discount": f"{rise}%", "compare_txt": f"¥{old_price:,} →", "time": datetime.now().isoformat()})
+                            logger.info(f"📈 回调: {info['name']} ¥{old_price:,}→¥{new_price:,}")
                     else:
-                        base_price, compare_txt = old_price, f"¥{old_price:,} →"
-                    discount = round((1 - new_price / base_price) * 100)
-                    if discount >= 2:
-                        sku_image = info.get("image", "")
-                        events.append({"type": "SALE", "product_name": info["name"], "sku": "全色", "number": info.get("number", ""), "url": url, "image": sku_image, "new_price": new_price, "discount": f"{discount}%", "compare_txt": compare_txt, "time": datetime.now().isoformat()})
-                        logger.info(f"📉 折扣: {info['name']} ¥{old_price:,}→¥{new_price:,}")
+                        if compare and compare > new_price:
+                            base_price, compare_txt = compare, f"~~¥{compare:,}~~ →"
+                        else:
+                            base_price, compare_txt = old_price, f"¥{old_price:,} →"
+                        discount = round((1 - new_price / base_price) * 100)
+                        if discount >= 2:
+                            sku_image = info.get("image", "")
+                            events.append({"type": "SALE", "product_name": info["name"], "sku": "全色", "number": info.get("number", ""), "url": url, "image": sku_image, "new_price": new_price, "discount": f"{discount}%", "compare_txt": compare_txt, "time": datetime.now().isoformat()})
+                            logger.info(f"📉 折扣: {info['name']} ¥{old_price:,}→¥{new_price:,}")
 
     logger.info(f"本轮扫描完成: {len(new_state)} 个商品, {len(events)} 个变化")
 
