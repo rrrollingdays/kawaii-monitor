@@ -264,16 +264,16 @@ def _event_desp(events):
 def _notify_sale(events):
     if len(events) == 1:
         e = events[0]
-        subject = f"💰 [olive] 折扣: {e['product_name']} -{e['discount']}"
+        subject = f"📉 [olive] 折扣: {e['product_name']} -{e['discount']}"
         title = f"[olive]折扣:{e['product_name'][:15]} -{e['discount']}"
     else:
-        subject = f"💰 [olive] {len(events)} 个商品限时折扣"
+        subject = f"📉 [olive] {len(events)} 个商品限时折扣"
         title = f"[olive]{len(events)}个折扣"
     rows = ""
     for e in events:
         img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
         rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#c0392b;font-weight:bold;">¥{e["new_price"]:,}（-{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
-    body = f'<html><body><h2 style="color:#c0392b;">💰 [OLIVE des OLIVE] 限时折扣</h2><p>{len(events)} 个商品降价:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
+    body = f'<html><body><h2 style="color:#c0392b;">📉 [OLIVE des OLIVE] 限时折扣</h2><p>{len(events)} 个商品降价:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
     desp = "### [olive] 限时折扣\n\n"
     for e in events:
         desp += f"**{e['product_name']}**\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（-{e['discount']}）\n- [查看商品]({e['url']})\n"
@@ -455,7 +455,7 @@ def main():
                 discount = round((1 - goods_price / old_price) * 100)
                 if discount >= 2:
                     events.append({"type": "SALE", "product_name": name, "sku": "全色", "number": gid, "url": url, "image": image, "new_price": goods_price, "discount": f"{discount}%", "compare_txt": f"¥{old_price:,} →", "time": datetime.now().isoformat()})
-                    logger.info(f"💰 折扣: {name} ¥{old_price:,}→¥{goods_price:,}")
+                    logger.info(f"📉 折扣: {name} ¥{old_price:,}→¥{goods_price:,}")
             new_goods_state[gid] = {"name": name, "image": image, "url": url, "skus": skus}
 
         time.sleep(ITEM_DELAY)
