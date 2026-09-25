@@ -111,6 +111,7 @@ def fetch_all_products():
             break
         start += PAGE_LIMIT
     return all_products
+
 def parse_record(p):
     """
     解析一条颜色记录
@@ -125,6 +126,7 @@ def parse_record(p):
         sku_list = []
 
     skus = {}
+    prices = {}
     sku_images = {}
     for s in sku_list:
         # 尺码名从 tags 里取（如 XSサイズ / フリーサイズ）
@@ -137,6 +139,12 @@ def parse_record(p):
         if stock is None:
             stock = 0
         skus[sku_name] = (stock <= 0)
+        try:
+            sp = int(float(s.get("sell_price") or 0))
+        except Exception:
+            sp = 0
+        if sp:
+            prices[sku_name] = sp
         img = s.get("image_url", "")
         if img and sku_name not in sku_images:
             sku_images[sku_name] = img
@@ -163,6 +171,7 @@ def parse_record(p):
         "main_image": main_image,
         "sku_images": sku_images,
         "skus": skus,
+        "prices": prices,
     }
 # ======================== 通知 ========================
 def send_email(subject, body_html):
@@ -195,7 +204,6 @@ def send_email(subject, body_html):
     logger.error("邮件发送失败")
     return False
 
-
 def send_wechat(title, desp):
     if not SERVERCHAN_KEY:
         logger.warning("Server酱未配置，跳过")
@@ -217,13 +225,9 @@ def send_bark(title, desp):
     if not BARK_URL:
         logger.warning("Bark 未配置，跳过")
         return False
-    m = re.search(r'src="([^"]+)"', desp)
-    image_url = m.group(1) if m else ""
     text = re.sub(r"<[^>]+>", "", desp)
     text = text.replace("**", "").replace("### ", "")[:900]
     payload = {"title": title[:60], "body": text, "group": "kawaii-monitor", "level": "timeSensitive"}
-    if image_url:
-        payload["image"] = image_url
     try:
         req = Request(BARK_URL, data=json.dumps(payload).encode("utf-8"),
                       headers={"Content-Type": "application/json; charset=utf-8"})
@@ -243,12 +247,38 @@ def notify_events(events):
     soldout_events = [e for e in events if e["type"] == "SOLD_OUT"]
     restock_events = [e for e in events if e["type"] == "RESTOCK"]
     new_events = [e for e in events if e["type"] == "NEW"]
+    sale_events = [e for e in events if e["type"] == "SALE"]
     if new_events:
         _notify_new(new_events)
+    if sale_events:
+        _notify_sale(sale_events)
     if soldout_events:
         _notify_soldout(soldout_events)
     if restock_events:
         _notify_restock(restock_events)
+
+def _notify_sale(events):
+    if len(events) == 1:
+        e = events[0]
+        subject = f"💰 [honeymew] 折扣: {e['product_name']} -{e['discount']}"
+        title = f"[honeymew]折扣:{e['product_name'][:15]} -{e['discount']}"
+    else:
+        subject = f"💰 [honeymew] {len(events)} 个SKU限时折扣"
+        title = f"[honeymew]{len(events)}个折扣"
+    rows = ""
+    for e in events:
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#c0392b;font-weight:bold;">¥{e["new_price"]:,}（-{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#c0392b;">💰 [honeymew] 限时折扣</h2><p>{len(events)} 个SKU降价:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
+    desp = "### [honeymew] 限时折扣\n\n"
+    for e in events:
+        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（-{e['discount']}）\n- [查看商品]({e['url']})\n"
+        if e.get("image"):
+            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
+        desp += "\n"
+    send_email(subject, body)
+    send_wechat(title, desp)
+    send_bark(title, desp)
 
 def _notify_soldout(events):
     if len(events) == 1:
@@ -342,6 +372,7 @@ def main():
             {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "sku": "シェルピンク / XSサイズ", "number": "NJJ0067C", "url": "https://mycolor.jp/honeymew/item/test", "image": "", "time": datetime.now().isoformat()},
             {"type": "RESTOCK", "product_name": "【测试-补货】", "sku": "ブラック / フリーサイズ", "number": "NJJ0067C", "url": "https://mycolor.jp/honeymew/item/test", "image": "", "time": datetime.now().isoformat()},
             {"type": "NEW", "product_name": "【测试-上新】", "sku": "シェルピンク", "number": "NJJ0067C", "url": "https://mycolor.jp/honeymew/item/test", "image": "", "time": datetime.now().isoformat()},
+            {"type": "SALE", "product_name": "【测试-折扣】", "sku": "ホワイト / フリーサイズ", "number": "NJJ0067C", "url": "https://mycolor.jp/honeymew/item/test", "image": "", "new_price": 6853, "discount": "30%", "compare_txt": "¥9,790 →", "time": datetime.now().isoformat()},
         ])
         return
 
@@ -374,6 +405,7 @@ def main():
         logger.info(f"honeymew 监控启动: 本轮全量扫描 {len(products)} 条颜色记录 (已有状态 {products_with_skus} 条)")
 
     new_state = {}
+    new_prices = {}
     events = []
 
     for p in products:
@@ -384,6 +416,7 @@ def main():
         if not info["skus"]:
             continue
         new_state[rid] = {"name": info["name"], "skus": info["skus"]}
+        new_prices[rid] = info.get("prices", {})
 
         is_new = rid not in seen_ids
         if is_new:
@@ -412,6 +445,21 @@ def main():
                     events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "number": info["number"], "url": info["url"], "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"📦 补货: {info['name']} - {sn}")
 
+        # ===== 折扣检测（新商品本轮只记录价格，次轮起对比）=====
+        if is_new:
+            continue
+        prev_prices = prev.get("_prices", {}).get(rid, {})
+        for sn, new_price in info.get("prices", {}).items():
+            old_price = prev_prices.get(sn, 0)
+            if not old_price or new_price >= old_price:
+                continue
+            discount = round((1 - new_price / old_price) * 100)
+            if discount < 2:
+                continue
+            sku_image = info["sku_images"].get(sn, "") or info["main_image"]
+            events.append({"type": "SALE", "product_name": info["name"], "sku": sn, "number": info["number"], "url": info["url"], "image": sku_image, "new_price": new_price, "discount": f"{discount}%", "compare_txt": f"¥{old_price:,} →", "time": datetime.now().isoformat()})
+            logger.info(f"💰 折扣: {info['name']} - {sn} ¥{old_price:,}→¥{new_price:,}")
+
     logger.info(f"本轮扫描完成: {len(new_state)} 条颜色记录, {len(events)} 个变化")
 
     if first_run:
@@ -425,6 +473,7 @@ def main():
     final_state = dict(prev)
     final_state.update(new_state)
     final_state["_seen_ids"] = sorted(seen_ids)
+    final_state["_prices"] = new_prices
     save_state(final_state)
     logger.info(f"状态已保存（已记录 {len(seen_ids)} 条）")
 
