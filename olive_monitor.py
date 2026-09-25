@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-palcloset.jp / OLIVE des OLIVE 卖空/补货/上新监控脚本
-- Palcloset 平台（非 Shopify），通过品牌列表页 HTML 解析
-- 列表页每个格子 = 一个 SKU（商品×颜色），SKU 卖空后从列表消失
-- 监控逻辑：SKU 出现（上新/新色/补货回归）+ SKU 消失（卖空）
-- 每轮拉 4 页列表（约 385 个 SKU），单页失败整轮作废防误报
+palcloset.jp / OLIVE des OLIVE 卖空/补货/上新监控脚本 v2
+- v1 用列表页 SKU 集合做"出现/消失"检测 → 误报严重：
+  Palcloset 列表页不反映库存状态（全卖空商品仍挂在列表），
+  且列表有 CDN 显示抖动（同一 SKU 时隐时现）→ 卖空/补货交替误报
+- v2 改为详情页真相源：
+  * 列表页（4页）只用于发现商品 ID 集合 + 新商品
+  * 每个商品的详情页是服务端渲染的稳定数据：颜色×尺码×在庫あり/在庫なし
+  * 每轮全量体检（约 153 商品 = 157 请求），状态翻转才发通知
+- 防抖动三重保险：
+  * 商品详情页连续 3 次抓取失败才认定下架（中间轮沿用旧状态）
+  * 一轮内详情页失败率 >30% → 本轮作废（数据不可信）
+  * 通知只在 OK↔OUT 真实翻转时发，列表抖动不再产生事件
 - 邮件(多收件人) + 微信 + Bark(带图) 三通道通知
 """
 import sys, os, re, json, smtplib, logging, ssl, time
@@ -20,11 +27,12 @@ from urllib.parse import urlencode
 BASE_URL = "https://www.palcloset.jp"
 BRAND = "olivedesolive"
 LIST_URL = f"{BASE_URL}/display/display/?mode=zSearch&SearchItem.SORT_KEY=RELEASE_DM&b={BRAND}"
-MAX_PAGES = 8          # 最多翻 8 页（当前 4 页，留余量自动扩容）
+MAX_PAGES = 8            # 列表页最多翻 8 页（当前 4 页够用）
 REQUEST_TIMEOUT = 25
-PAGE_DELAY = 2         # 翻页间隔，对服务器友好
-USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-SNAPSHOT_MIN_RATIO = 0.6   # 本轮 SKU 数低于上轮 60% 时，跳过卖空检测（防半页失败误报）
+LIST_PAGE_DELAY = 2      # 列表页翻页间隔
+ITEM_DELAY = 0.4         # 详情页请求间隔（对服务器友好）
+MAX_ITEM_FAILURE_RATE = 0.30   # 一轮内详情页失败率超 30% → 本轮作废
+ITEM_FAIL_CONFIRM = 3    # 商品连续 3 次抓取失败才认定下架移除
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_USER = os.environ.get("SMTP_USER", "")
@@ -43,18 +51,15 @@ logger = logging.getLogger("olive-monitor")
 
 # ======================== 网络请求 ========================
 def fetch_url(url):
-    """抓取 URL 返回文本"""
     req = Request(url, headers={
-        "User-Agent": USER_AGENT,
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
         "Accept-Language": "ja,en;q=0.9",
         "Accept": "text/html,*/*"
     })
     with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-        raw = resp.read()
-    return raw.decode("utf-8", errors="replace")
+        return resp.read().decode("utf-8", errors="replace")
 
 def fetch_url_with_retry(url, retries=3, base_delay=2):
-    """带退避重试的抓取"""
     for attempt in range(1, retries + 1):
         try:
             return fetch_url(url)
@@ -71,69 +76,97 @@ def fetch_url_with_retry(url, retries=3, base_delay=2):
                 continue
             raise
 
-# ======================== 商品获取 ========================
+# ======================== 列表页：发现商品 ========================
 def parse_list_page(html):
-    """
-    解析一页列表 HTML，返回 SKU 列表
-    每个格子 = <a href="/display/item/{goods_id}/?cl={cl}" onclick="dataLayer.push({...items:[{...}]})">
-    dataLayer 内含结构化数据: item_id(SKU全号)/item_name/price/item_variant
-    """
-    skus = []
-    # 逐个 <a href="/display/item/... 切窗口到 </a>
-    for m in re.finditer(r'<a href="/display/item/([^/?"]+)/\?cl=(\d+)', html):
-        goods_id, cl = m.group(1), m.group(2)
+    """解析一页列表 HTML，返回商品列表（goods_id + 名称 + 图）"""
+    goods = {}
+    for m in re.finditer(r'href="/display/item/([^/?"]+)/\?cl=(\d+)', html):
+        gid = m.group(1)
         end = html.find("</a>", m.start())
         block = html[m.start():end if end > 0 else m.start() + 6000]
-        # dataLayer 结构化数据
         dl = re.search(r"&#39;items&#39;: \[(\{.*?\})\]", block)
         if not dl:
             continue
         raw = dl.group(1).replace("&#39;", "'")
         pairs = dict(re.findall(r"'(\w+)':'([^']*)'", raw))
-        sku_id = pairs.get("item_id", "")
-        if not sku_id:
+        name = pairs.get("item_name", "")
+        if not name:
             continue
-        # 图片（懒加载 data-src）
         img = ""
         im = re.search(r'data-src="([^"]+)"', block)
         if im:
             img = im.group(1).replace("&amp;", "&")
-        skus.append({
-            "sku_id": sku_id,
-            "goods_id": goods_id,
-            "cl": cl,
-            "name": pairs.get("item_name", ""),
-            "variant": pairs.get("item_variant", ""),
-            "price": pairs.get("price", ""),
-            "category": pairs.get("item_category", ""),
-            "image": img,
-            "url": f"{BASE_URL}/display/item/{goods_id}/?cl={cl}&b={BRAND}",
-        })
-    # 同页可能重复（PC/SP 双版本），按 sku_id 去重
-    seen = {}
-    for s in skus:
-        seen.setdefault(s["sku_id"], s)
-    return list(seen.values())
+        goods.setdefault(gid, {"name": name, "image": img, "url": f"{BASE_URL}/display/item/{gid}/?b={BRAND}"})
+    return list(goods.values())
 
-def fetch_all_skus():
-    """
-    翻页拉取品牌全部在售 SKU
-    任何一页失败 → 整轮作废（抛异常），防止半页数据导致大量"假卖空"
-    """
-    all_skus = {}
+def fetch_list_goods():
+    """翻页拉列表页，返回当轮商品集合 {gid: info}。任何一页失败整轮作废"""
+    result = {}
     for page in range(1, MAX_PAGES + 1):
-        url = f"{LIST_URL}&p={page}"
-        html = fetch_url_with_retry(url)  # 失败直接抛
-        page_skus = parse_list_page(html)
-        logger.info(f"第 {page} 页: {len(page_skus)} 个SKU (累计 {len(all_skus) + len(page_skus)})")
-        if not page_skus:
+        html = fetch_url_with_retry(f"{LIST_URL}&p={page}")
+        page_goods = parse_list_page(html)
+        logger.info(f"列表第 {page} 页: {len(page_goods)} 个商品 (累计 {len(result) + len(page_goods)})")
+        if not page_goods:
             break
-        for s in page_skus:
-            all_skus[s["sku_id"]] = s
-        if len(page_skus) < 20:   # 最后一页（当前尾页 25 格，阈值放 20）
+        for g in page_goods:
+            result[g["url"]] = g
+        if len(page_goods) < 10:
             break
-        time.sleep(PAGE_DELAY)
-    return list(all_skus.values())
+        time.sleep(LIST_PAGE_DELAY)
+    # 按 gid 重组
+    out = {}
+    for g in result.values():
+        gid = g["url"].split("/item/")[1].split("/")[0]
+        out[gid] = g
+    return out
+
+# ======================== 详情页：库存真相 ========================
+def parse_item_page(html):
+    """
+    解析商品详情页，返回 {sku_cd: {"variant":颜色, "size":尺码, "state":"OK"/"OUT"}}
+    结构：每个颜色一个 cart_pic__desc__color 标记，其后每个尺码一个 <dl id="skuEvent">
+    dt 文本形态："FREE/在庫あり"、"M/在庫なし"、可附 deliveryplan（预约出荷）
+    """
+    colors = [(m.start(), m.group(1)) for m in re.finditer(r'cart_pic__desc__color">カラー：([^<]+)</p>', html)]
+    dls = [(m.start(), m.group(0)) for m in re.finditer(r'<dl class="clearfix f_wrap"[^>]*id="skuEvent"[^>]*>.*?</dl>', html, re.S)]
+    if not dls:
+        return {}
+    skus = {}
+    cur_color = ""
+    ci = 0
+    for pos, dl in dls:
+        while ci < len(colors) and colors[ci][0] < pos:
+            cur_color = colors[ci][1]
+            ci += 1
+        dt_m = re.search(r'<dt>(.*?)</dt>', dl, re.S)
+        if not dt_m:
+            continue
+        dt_text = re.sub(r"\s+", " ", dt_m.group(1)).strip()
+        sku_m = re.search(r'name="shopSkuCd" value="(\d+)"', dl)
+        if not sku_m:
+            # 无有效 SKU 编号 = JS 模板块（display:none 的克隆源），跳过
+            continue
+        state = "OUT" if "在庫なし" in dt_text else "OK"
+        size = dt_text.split("/")[0].strip() if "/" in dt_text else ""
+        # 预约（予約）状态也算 OK（可以下单）；仅"在庫なし"才算卖空
+        skus[sku_m.group(1)] = {"variant": cur_color, "size": size, "state": state}
+    return skus
+
+def fetch_item_state(gid):
+    """抓单商品详情页并解析。返回 (skus, ok)"""
+    try:
+        html = fetch_url_with_retry(f"{BASE_URL}/display/item/{gid}/")
+    except HTTPError as e:
+        logger.warning(f"详情页 HTTP {e.code}: {gid}")
+        return None, False
+    except Exception as e:
+        logger.warning(f"详情页抓取失败: {gid} {e}")
+        return None, False
+    skus = parse_item_page(html)
+    if not skus:
+        logger.warning(f"详情页解析为空（结构变化或被拦截）: {gid}")
+        return None, False
+    return skus, True
 
 # ======================== 通知 ========================
 def send_email(subject, body_html):
@@ -207,19 +240,6 @@ def send_bark(title, desp):
         logger.error(f"Bark 推送失败: {e}")
     return False
 
-def notify_events(events):
-    if not events:
-        return
-    soldout_events = [e for e in events if e["type"] == "SOLD_OUT"]
-    restock_events = [e for e in events if e["type"] == "RESTOCK"]
-    new_events = [e for e in events if e["type"] == "NEW"]
-    if new_events:
-        _notify_new(new_events)
-    if soldout_events:
-        _notify_soldout(soldout_events)
-    if restock_events:
-        _notify_restock(restock_events)
-
 def _event_rows(events, color):
     rows = ""
     for e in events:
@@ -230,7 +250,7 @@ def _event_rows(events, color):
 def _event_desp(events):
     desp = ""
     for e in events:
-        desp += f"**{e['product_name']}**\n- 货号: {e.get('number', '无')}\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
+        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- [查看商品]({e['url']})\n"
         if e.get("image"):
             desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
         desp += "\n"
@@ -244,8 +264,8 @@ def _notify_soldout(events):
     else:
         subject = f"🚨 [olive] {len(events)} 个SKU卖空"
         title = f"[olive]{len(events)}个SKU卖空"
-    body = f'<html><body><h2 style="color:#e74c3c;">🚨 [OLIVE des OLIVE] 商品卖空告警</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{_event_rows(events, "#e74c3c")}</table></body></html>'
-    desp = "### [olive] 卖空告警\n\n" + _event_desp(events)
+    body = f'<html><body><h2 style="color:#e74c3c;">🚨 [OLIVE des OLIVE] 商品卖空</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{_event_rows(events, "#e74c3c")}</table></body></html>'
+    desp = "### [olive] 卖空\n\n" + _event_desp(events)
     send_email(subject, body)
     send_wechat(title, desp)
     send_bark(title, desp)
@@ -258,7 +278,7 @@ def _notify_restock(events):
     else:
         subject = f"📦 [olive] {len(events)} 个SKU补货"
         title = f"[olive]{len(events)}个SKU补货"
-    body = f'<html><body><h2 style="color:#27ae60;">📦 [OLIVE des OLIVE] 补货通知</h2><p>{len(events)} 个SKU已补货上架:</p><table style="border-collapse:collapse;">{_event_rows(events, "#27ae60")}</table></body></html>'
+    body = f'<html><body><h2 style="color:#27ae60;">📦 [OLIVE des OLIVE] 补货通知</h2><p>{len(events)} 个SKU补货:</p><table style="border-collapse:collapse;">{_event_rows(events, "#27ae60")}</table></body></html>'
     desp = "### [olive] 补货通知\n\n" + _event_desp(events)
     send_email(subject, body)
     send_wechat(title, desp)
@@ -272,11 +292,24 @@ def _notify_new(events):
     else:
         subject = f"🆕 [olive] {len(events)} 个SKU上新"
         title = f"[olive]{len(events)}个上新"
-    body = f'<html><body><h2 style="color:#e67e22;">🆕 [OLIVE des OLIVE] 上新通知</h2><p>{len(events)} 个SKU上架:</p><table style="border-collapse:collapse;">{_event_rows(events, "#e67e22")}</table></body></html>'
+    body = f'<html><body><h2 style="color:#e67e22;">🆕 [OLIVE des OLIVE] 上新通知</h2><p>{len(events)} 个SKU上新:</p><table style="border-collapse:collapse;">{_event_rows(events, "#e67e22")}</table></body></html>'
     desp = "### [olive] 上新通知\n\n" + _event_desp(events)
     send_email(subject, body)
     send_wechat(title, desp)
     send_bark(title, desp)
+
+def notify_events(events):
+    if not events:
+        return
+    soldout = [e for e in events if e["type"] == "SOLD_OUT"]
+    restock = [e for e in events if e["type"] == "RESTOCK"]
+    new = [e for e in events if e["type"] == "NEW"]
+    if new:
+        _notify_new(new)
+    if soldout:
+        _notify_soldout(soldout)
+    if restock:
+        _notify_restock(restock)
 
 # ======================== 状态管理 ========================
 def load_state():
@@ -299,87 +332,114 @@ def save_state(state):
 def main():
     if "--test-notify" in sys.argv:
         notify_events([
-            {"type": "RESTOCK", "product_name": "【测试】Aimerianejoieキルティングキャリーオントート", "sku": "ミント", "number": "1051200120", "url": "https://www.palcloset.jp/display/item/1051200120/?cl=19&b=olivedesolive", "image": "https://contents.palcloset.jp/static/images/item/652890_3064210_1.jpg", "time": datetime.now().isoformat()},
-            {"type": "NEW", "product_name": "【测试】ナポレオンジップブルゾン", "sku": "サックスブルー", "number": "1062060200", "url": "https://www.palcloset.jp/display/item/1062060200/?cl=34&b=olivedesolive", "image": "https://contents.palcloset.jp/static/images/item/746200_3068991_1.jpg", "time": datetime.now().isoformat()},
+            {"type": "RESTOCK", "product_name": "【测试】Aimerianejoieキルティングキャリーオントート", "sku": "ミント / FREE", "number": "1051200120", "url": "https://www.palcloset.jp/display/item/1051200120/", "image": "https://contents.palcloset.jp/static/images/item/652890_3064210_1.jpg", "time": datetime.now().isoformat()},
+            {"type": "NEW", "product_name": "【测试】ナポレオンジップブルゾン", "sku": "サックスブルー / FREE", "number": "1062060200", "url": "https://www.palcloset.jp/display/item/1062060200/", "image": "https://contents.palcloset.jp/static/images/item/746200_3068991_1.jpg", "time": datetime.now().isoformat()},
         ])
         return
 
-    # 拉取品牌全部在售 SKU（任何一页失败整轮作废）
+    # ===== 第 1 步：列表页发现商品集合 =====
     try:
-        skus = fetch_all_skus()
+        list_goods = fetch_list_goods()
     except Exception as e:
-        logger.warning(f"获取列表失败: {e}，本轮跳过，保留旧状态")
+        logger.warning(f"列表页抓取失败: {e}，本轮作废，保留旧状态")
         return
-    if len(skus) < 10:
-        logger.warning(f"仅抓到 {len(skus)} 个SKU，数据异常，本轮作废")
+    if len(list_goods) < 10:
+        logger.warning(f"列表仅 {len(list_goods)} 商品，数据异常，本轮作废")
         return
 
     prev = load_state()
-    prev_snapshot = prev.get("_snapshot", {})      # 上一轮 SKU 快照
-    seen_skus = prev.get("_seen_skus", {})          # 历史见过的全部 SKU（永不删除）
+    prev_goods = prev.get("_goods", {})           # {gid: {"name","image","url","skus":{}}}
+    seen_goods = set(prev.get("_seen_goods", list(prev_goods.keys())))
+    fail_count = prev.get("_fail_count", {})
 
-    first_run = len(prev_snapshot) == 0
-    if first_run:
-        logger.info("首次运行：建立基线状态，本轮不发通知")
-    else:
-        logger.info(f"olive 监控启动: 本轮 {len(skus)} 个SKU (上轮 {len(prev_snapshot)})")
-
-    cur_snapshot = {}
-    for s in skus:
-        cur_snapshot[s["sku_id"]] = {
-            "name": s["name"], "variant": s["variant"], "price": s["price"],
-            "goods_id": s["goods_id"], "cl": s["cl"], "image": s["image"],
-            "url": s["url"],
-        }
+    # 目标集合 = 当轮列表 ∪ 历史见过（新商品自动纳入；列表抖动不再影响覆盖）
+    targets = sorted(set(list_goods.keys()) | seen_goods)
+    first_run = len(prev_goods) == 0
+    logger.info(f"{'首次运行' if first_run else 'olive v2 启动'}: 本轮体检 {len(targets)} 个商品 (列表发现 {len(list_goods)})")
 
     events = []
-    if not first_run:
-        cur_ids = set(cur_snapshot.keys())
-        prev_ids = set(prev_snapshot.keys())
+    new_goods_state = {}
+    failed = 0
 
-        # ===== 出现检测（上新/新色/补货回归）——数据可信，总是安全 =====
-        for sid in sorted(cur_ids - prev_ids):
-            info = cur_snapshot[sid]
-            ever = sid in seen_skus
-            etype = "RESTOCK" if ever else "NEW"
-            events.append({
-                "type": etype, "product_name": info["name"],
-                "sku": info["variant"] or sid, "number": info["goods_id"],
-                "url": info["url"], "image": info["image"],
-                "time": datetime.now().isoformat(),
-            })
-            logger.info(f"{'📦 补货' if ever else '🆕 上新'}: {info['name']} - {info['variant']}")
+    for gid in targets:
+        info = list_goods.get(gid) or prev_goods.get(gid, {})
+        skus, ok = fetch_item_state(gid)
+        if not ok:
+            # 失败处理：连续失败达阈值 → 静默下架；否则沿用旧状态
+            fail_count[gid] = fail_count.get(gid, 0) + 1
+            failed += 1
+            if fail_count[gid] >= ITEM_FAIL_CONFIRM:
+                logger.warning(f"商品连续 {fail_count[gid]} 次抓取失败，从监控移除: {gid}")
+                fail_count.pop(gid, None)
+                seen_goods.discard(gid)
+            else:
+                if gid in prev_goods:
+                    new_goods_state[gid] = prev_goods[gid]  # 沿用旧状态，不产生事件
+            time.sleep(ITEM_DELAY)
+            continue
 
-        # ===== 消失检测（卖空/下架）——半页失败防线 =====
-        ratio = len(cur_ids) / max(len(prev_ids), 1)
-        if ratio < SNAPSHOT_MIN_RATIO:
-            logger.warning(f"本轮SKU数仅为上轮 {ratio:.0%}，疑似抓取不完整，跳过卖空检测")
+        fail_count.pop(gid, None)
+        name = info.get("name", "")
+        image = info.get("image", "")
+        url = info.get("url", f"{BASE_URL}/display/item/{gid}/")
+
+        if first_run:
+            new_goods_state[gid] = {"name": name, "image": image, "url": url, "skus": skus}
+        elif gid not in prev_goods:
+            # ===== 新商品 =====
+            first_sku = next(iter(skus.values()), {})
+            sku_label = f"{first_sku.get('variant','')} / {first_sku.get('size','')}".strip(" /")
+            events.append({"type": "NEW", "product_name": name, "sku": sku_label,
+                           "number": gid, "url": url, "image": image,
+                           "time": datetime.now().isoformat()})
+            logger.info(f"🆕 上新: {name} ({len(skus)} SKU)")
+            new_goods_state[gid] = {"name": name, "image": image, "url": url, "skus": skus}
         else:
-            for sid in sorted(prev_ids - cur_ids):
-                info = prev_snapshot[sid]
-                events.append({
-                    "type": "SOLD_OUT", "product_name": info["name"],
-                    "sku": info["variant"] or sid, "number": info["goods_id"],
-                    "url": info["url"], "image": info["image"],
-                    "time": datetime.now().isoformat(),
-                })
-                logger.info(f"🚨 卖空: {info['name']} - {info['variant']}")
+            # ===== 老商品：SKU 状态对比 =====
+            prev_skus = prev_goods.get(gid, {}).get("skus", {})
+            for scd, s in skus.items():
+                label = f"{s['variant']} / {s['size']}".strip(" /")
+                old = prev_skus.get(scd)
+                if old is None:
+                    events.append({"type": "NEW", "product_name": name, "sku": label,
+                                   "number": gid, "url": url, "image": image,
+                                   "time": datetime.now().isoformat()})
+                    logger.info(f"🆕 新SKU: {name} - {label}")
+                elif old.get("state") == "OUT" and s["state"] == "OK":
+                    events.append({"type": "RESTOCK", "product_name": name, "sku": label,
+                                   "number": gid, "url": url, "image": image,
+                                   "time": datetime.now().isoformat()})
+                    logger.info(f"📦 补货: {name} - {label}")
+                elif old.get("state") == "OK" and s["state"] == "OUT":
+                    events.append({"type": "SOLD_OUT", "product_name": name, "sku": label,
+                                   "number": gid, "url": url, "image": image,
+                                   "time": datetime.now().isoformat()})
+                    logger.info(f"🚨 卖空: {name} - {label}")
+            new_goods_state[gid] = {"name": name, "image": image, "url": url, "skus": skus}
 
-    logger.info(f"本轮扫描完成: {len(cur_snapshot)} 个SKU, {len(events)} 个变化")
+        time.sleep(ITEM_DELAY)
+
+    # 失败率防线：详情页大面积失败 → 数据不可信 → 本轮作废
+    if targets and failed / len(targets) > MAX_ITEM_FAILURE_RATE:
+        logger.warning(f"详情页失败率 {failed}/{len(targets)} 超阈值，本轮作废，保留旧状态")
+        return
+
+    logger.info(f"本轮完成: {len(targets)} 商品体检, {failed} 失败, {len(events)} 个变化")
 
     if first_run:
-        logger.info(f"基线建立完成: {len(cur_snapshot)} 个SKU已记录，下一轮开始正常监控")
+        logger.info(f"基线建立完成: {len(new_goods_state)} 商品已记录，下一轮开始正常监控")
     elif events:
         notify_events(events)
     else:
         logger.info("本轮无变化")
 
-    # 保存状态：快照 + 历史见过集合（回归检测用）
-    for sid in cur_snapshot:
-        seen_skus[sid] = datetime.now().strftime("%Y-%m-%d")
-    new_state = {"_snapshot": cur_snapshot, "_seen_skus": seen_skus}
-    save_state(new_state)
-    logger.info(f"状态已保存（历史 SKU {len(seen_skus)} 个）")
+    seen_goods |= set(new_goods_state.keys())
+    save_state({
+        "_goods": new_goods_state,
+        "_seen_goods": sorted(seen_goods),
+        "_fail_count": fail_count,
+    })
+    logger.info(f"状态已保存（{len(seen_goods)} 个商品）")
 
 if __name__ == "__main__":
     main()
