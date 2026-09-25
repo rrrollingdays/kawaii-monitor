@@ -284,6 +284,29 @@ def _notify_sale(events):
     send_wechat(title, desp)
     send_bark(title, desp)
 
+def _notify_priceup(events):
+    if len(events) == 1:
+        e = events[0]
+        subject = f"📈 [olive] 回调: {e['product_name']} +{e['discount']}"
+        title = f"[olive]回调:{e['product_name'][:15]} +{e['discount']}"
+    else:
+        subject = f"📈 [olive] {len(events)} 个商品价格回调"
+        title = f"[olive]{len(events)}个回调"
+    rows = ""
+    for e in events:
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">¥{e["new_price"]:,}（+{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#27ae60;">📈 [OLIVE des OLIVE] 价格回调</h2><p>{len(events)} 个商品涨价:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
+    desp = "### [olive] 价格回调\n\n"
+    for e in events:
+        desp += f"**{e['product_name']}**\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（+{e['discount']}）\n- [查看商品]({e['url']})\n"
+        if e.get("image"):
+            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
+        desp += "\n"
+    send_email(subject, body)
+    send_wechat(title, desp)
+    send_bark(title, desp)
+
 def _notify_soldout(events):
     if len(events) == 1:
         e = events[0]
@@ -333,10 +356,13 @@ def notify_events(events):
     restock = [e for e in events if e["type"] == "RESTOCK"]
     new = [e for e in events if e["type"] == "NEW"]
     sale = [e for e in events if e["type"] == "SALE"]
+    priceup = [e for e in events if e["type"] == "PRICE_UP"]
     if new:
         _notify_new(new)
     if sale:
         _notify_sale(sale)
+    if priceup:
+        _notify_priceup(priceup)
     if soldout:
         _notify_soldout(soldout)
     if restock:
@@ -451,11 +477,18 @@ def main():
 
             # ===== 折扣检测（商品级价格下降）=====
             old_price = prev.get("_prices", {}).get(gid, 0)
-            if goods_price and old_price and goods_price < old_price:
-                discount = round((1 - goods_price / old_price) * 100)
-                if discount >= 2:
-                    events.append({"type": "SALE", "product_name": name, "sku": "全色", "number": gid, "url": url, "image": image, "new_price": goods_price, "discount": f"{discount}%", "compare_txt": f"¥{old_price:,} →", "time": datetime.now().isoformat()})
-                    logger.info(f"📉 折扣: {name} ¥{old_price:,}→¥{goods_price:,}")
+            if goods_price and old_price and goods_price != old_price:
+                if goods_price > old_price:
+                    # ===== 价格回调检测（涨价 >=2% 触发）=====
+                    rise = round((goods_price / old_price - 1) * 100)
+                    if rise >= 2:
+                        events.append({"type": "PRICE_UP", "product_name": name, "sku": "全色", "number": gid, "url": url, "image": image, "new_price": goods_price, "discount": f"{rise}%", "compare_txt": f"¥{old_price:,} →", "time": datetime.now().isoformat()})
+                        logger.info(f"📈 回调: {name} ¥{old_price:,}→¥{goods_price:,}")
+                else:
+                    discount = round((1 - goods_price / old_price) * 100)
+                    if discount >= 2:
+                        events.append({"type": "SALE", "product_name": name, "sku": "全色", "number": gid, "url": url, "image": image, "new_price": goods_price, "discount": f"{discount}%", "compare_txt": f"¥{old_price:,} →", "time": datetime.now().isoformat()})
+                        logger.info(f"📉 折扣: {name} ¥{old_price:,}→¥{goods_price:,}")
             new_goods_state[gid] = {"name": name, "image": image, "url": url, "skus": skus}
 
         time.sleep(ITEM_DELAY)
