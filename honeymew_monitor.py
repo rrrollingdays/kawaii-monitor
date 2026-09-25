@@ -248,10 +248,13 @@ def notify_events(events):
     restock_events = [e for e in events if e["type"] == "RESTOCK"]
     new_events = [e for e in events if e["type"] == "NEW"]
     sale_events = [e for e in events if e["type"] == "SALE"]
+    priceup_events = [e for e in events if e["type"] == "PRICE_UP"]
     if new_events:
         _notify_new(new_events)
     if sale_events:
         _notify_sale(sale_events)
+    if priceup_events:
+        _notify_priceup(priceup_events)
     if soldout_events:
         _notify_soldout(soldout_events)
     if restock_events:
@@ -273,6 +276,29 @@ def _notify_sale(events):
     desp = "### [honeymew] 限时折扣\n\n"
     for e in events:
         desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（-{e['discount']}）\n- [查看商品]({e['url']})\n"
+        if e.get("image"):
+            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
+        desp += "\n"
+    send_email(subject, body)
+    send_wechat(title, desp)
+    send_bark(title, desp)
+
+def _notify_priceup(events):
+    if len(events) == 1:
+        e = events[0]
+        subject = f"📈 [honeymew] 回调: {e['product_name']} +{e['discount']}"
+        title = f"[honeymew]回调:{e['product_name'][:15]} +{e['discount']}"
+    else:
+        subject = f"📈 [honeymew] {len(events)} 个SKU价格回调"
+        title = f"[honeymew]{len(events)}个回调"
+    rows = ""
+    for e in events:
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">¥{e["new_price"]:,}（+{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#27ae60;">📈 [honeymew] 价格回调</h2><p>{len(events)} 个SKU涨价:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
+    desp = "### [honeymew] 价格回调\n\n"
+    for e in events:
+        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（+{e['discount']}）\n- [查看商品]({e['url']})\n"
         if e.get("image"):
             desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
         desp += "\n"
@@ -451,7 +477,16 @@ def main():
         prev_prices = prev.get("_prices", {}).get(rid, {})
         for sn, new_price in info.get("prices", {}).items():
             old_price = prev_prices.get(sn, 0)
-            if not old_price or new_price >= old_price:
+            if not old_price or new_price == old_price:
+                continue
+            if new_price > old_price:
+                # ===== 价格回调检测（涨价 >=2% 触发）=====
+                rise = round((new_price / old_price - 1) * 100)
+                if rise < 2:   # 忽略 <2% 微调
+                    continue
+                sku_image = info["sku_images"].get(sn, "") or info["main_image"]
+                events.append({"type": "PRICE_UP", "product_name": info["name"], "sku": sn, "number": info["number"], "url": info["url"], "image": sku_image, "new_price": new_price, "discount": f"{rise}%", "compare_txt": f"¥{old_price:,} →", "time": datetime.now().isoformat()})
+                logger.info(f"📈 回调: {info['name']} - {sn} ¥{old_price:,}→¥{new_price:,}")
                 continue
             discount = round((1 - new_price / old_price) * 100)
             if discount < 2:
