@@ -45,14 +45,10 @@ logger = logging.getLogger("monitor")
 
 # ======================== 通知 ========================
 def send_email(subject, body_html):
-    recipients = [x.strip() for x in EMAIL_TO.split(",") if x.strip()]
-    if not SMTP_USER or not SMTP_PASSWORD or not recipients:
-        logger.warning("邮件配置不完整，跳过")
+    if not SMTP_USER or not SMTP_PASSWORD or not EMAIL_TO:
         return False
     msg = MIMEMultipart("alternative")
-    msg["From"] = SMTP_USER
-    msg["To"] = ", ".join(recipients)
-    msg["Subject"] = subject
+    msg["From"] = SMTP_USER; msg["To"] = EMAIL_TO; msg["Subject"] = subject
     msg.attach(MIMEText(re.sub(r'<[^>]+>', '', body_html), "plain", "utf-8"))
     msg.attach(MIMEText(body_html, "html", "utf-8"))
     ctx = ssl.create_default_context()
@@ -62,18 +58,17 @@ def send_email(subject, body_html):
                 with smtplib.SMTP(SMTP_SERVER, 587, timeout=15) as s:
                     s.ehlo(); s.starttls(context=ctx); s.ehlo()
                     s.login(SMTP_USER, SMTP_PASSWORD)
-                    s.sendmail(SMTP_USER, recipients, msg.as_string())
+                    s.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
             else:
                 with smtplib.SMTP_SSL(SMTP_SERVER, 465, context=ctx, timeout=15) as s:
                     s.login(SMTP_USER, SMTP_PASSWORD)
-                    s.sendmail(SMTP_USER, recipients, msg.as_string())
+                    s.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
             logger.info(f"邮件已发送: {subject}")
             return True
         except Exception as e:
             logger.debug(f"端口{port}失败: {e}")
     logger.error("邮件发送失败")
     return False
-
 
 def send_wechat(title, desp):
     if not SERVERCHAN_KEY:
@@ -90,18 +85,13 @@ def send_wechat(title, desp):
     except Exception as e:
         logger.error(f"微信推送失败: {e}")
     return False
-    
 def send_bark(title, desp):
     if not BARK_URL:
         logger.warning("Bark 未配置，跳过")
         return False
-    m = re.search(r'src="([^"]+)"', desp)
-    image_url = m.group(1) if m else ""
     text = re.sub(r"<[^>]+>", "", desp)
     text = text.replace("**", "").replace("### ", "")[:900]
     payload = {"title": title[:60], "body": text, "group": "kawaii-monitor", "level": "timeSensitive"}
-    if image_url:
-        payload["image"] = image_url
     try:
         req = Request(BARK_URL, data=json.dumps(payload).encode("utf-8"),
                       headers={"Content-Type": "application/json; charset=utf-8"})
@@ -123,10 +113,36 @@ def notify_events(events):
     new_events = [e for e in events if e["type"] == "NEW"]
     if new_events:
         _notify_new(new_events)
+    sale_events = [e for e in events if e["type"] == "SALE"]
+    if sale_events:
+        _notify_sale(sale_events)
     if soldout_events:
         _notify_soldout(soldout_events)
     if restock_events:
         _notify_restock(restock_events)
+
+def _notify_sale(events):
+    if len(events) == 1:
+        e = events[0]
+        subject = f"💰 [lizlisa] 折扣: {e['product_name']} -{e['discount']}"
+        title = f"[lizlisa]折扣:{e['product_name'][:15]} -{e['discount']}"
+    else:
+        subject = f"💰 [lizlisa] {len(events)} 个商品限时折扣"
+        title = f"[lizlisa]{len(events)}个折扣"
+    rows = ""
+    for e in events:
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#c0392b;font-weight:bold;">¥{e["new_price"]:,}（-{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#c0392b;">💰 [lizlisa] 限时折扣</h2><p>{len(events)} 个商品降价:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
+    desp = "### [lizlisa] 限时折扣\n\n"
+    for e in events:
+        desp += f"**{e['product_name']}**\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（-{e['discount']}）\n- [查看商品]({e['url']})\n"
+        if e.get("image"):
+            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
+        desp += "\n"
+    send_email(subject, body)
+    send_wechat(title, desp)
+    send_bark(title, desp)
 
 def _notify_soldout(events):
     if len(events) == 1:
@@ -216,6 +232,17 @@ def parse_product(html):
         sold = bool(re.search(r'SOLD\s*OUT', raw, re.IGNORECASE))
         clean = re.sub(r'\s*/?\s*SOLD\s*OUT\s*$', '', clean, flags=re.IGNORECASE).strip()
         skus.append({"name": clean, "sold_out": sold})
+    # 提取价格（FS2_itemPrice_area 区域；打折时通常有原价+现价两个数字）
+    price_info = {"price": 0, "compare": 0}
+    pm = re.search(r'<div class="FS2_itemPrice_area">(.*?)</div>', html, re.DOTALL)
+    if pm:
+        nums = [int(n.replace(",", "")) for n in re.findall(r'\d{1,3}(?:,\d{3})+|\d{3,}', pm.group(1))]
+        nums = [n for n in nums if n >= 100]   # 过滤积分等小数字
+        if len(nums) == 1:
+            price_info["price"] = nums[0]
+        elif len(nums) >= 2:
+            price_info["compare"], price_info["price"] = nums[0], nums[-1]
+
     # 提取商品主图（模特图）
     image = ""
     img_m = re.search(r'https://lizlisaadmin\.fs-storage\.jp/fs2cabinet/[^"\'<>\s]*-m-01-ds\.[^"\'<>\s]+', html)
@@ -228,7 +255,7 @@ def parse_product(html):
         color_name = m.group(2).strip()
         if color_name and color_name not in color_images:
             color_images[color_name] = img_url.replace("-ds.", "-pl.")
-    return {"name": name, "number": num, "image": image, "color_images": color_images, "skus": skus}
+    return {"name": name, "number": num, "image": image, "color_images": color_images, "skus": skus, "price_info": price_info}
 
 def fetch_page(url):
     req = Request(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.9"})
@@ -316,6 +343,7 @@ def main():
             {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "sku": "ピンク(110)", "number": "262-6230-0", "url": "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0", "time": datetime.now().isoformat()},
             {"type": "RESTOCK", "product_name": "【测试-补货】", "sku": "ブラック(104)", "number": "262-6230-0", "url": "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0", "time": datetime.now().isoformat()},
             {"type": "NEW", "product_name": "【测试-上新】", "sku": "ホワイト(104)", "number": "262-6230-0", "url": "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0", "time": datetime.now().isoformat()},
+            {"type": "SALE", "product_name": "【测试-折扣】", "sku": "全色", "number": "262-6230-0", "url": "https://www.tokyokawaiilife.jp/fs/lizlisaadmin/262-6230-0", "image": "", "new_price": 7245, "discount": "30%", "compare_txt": "~~¥10,350~~ →", "time": datetime.now().isoformat()},
         ])
         return
 
@@ -348,6 +376,7 @@ def main():
     products_with_skus = len([k for k in prev.keys() if not k.startswith("_")])
 
     new_state = {}
+    new_prices = {}
     events = []
 
     # ===== 全局新品检测：立即处理，不受 cursor 影响 =====
@@ -363,6 +392,7 @@ def main():
                 if not cur:
                     continue
                 new_state[url] = {"name": info["name"], "skus": cur}
+                new_prices[url] = info.get("price_info", {})
                 seen_urls.add(url)
                 # 上新通知
                 first_sku = next(iter(cur.keys()), "")
@@ -391,6 +421,7 @@ def main():
             if not cur:
                 continue
             new_state[url] = {"name": info["name"], "skus": cur}
+            new_prices[url] = info.get("price_info", {})
             color_images = info.get("color_images", {})
             prev_skus = prev.get(url, {}).get("skus", {})
             for sn, so in cur.items():
@@ -403,6 +434,22 @@ def main():
                 elif not so and was:
                     events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "number": info.get("number", ""), "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"📦 补货: {info['name']} - {sn}")
+
+            # ===== 折扣检测（商品级价格；新商品次轮起对比）=====
+            if url in prev:
+                pi = info.get("price_info", {})
+                new_price, compare = pi.get("price", 0), pi.get("compare", 0)
+                old_price = prev.get("_prices", {}).get(url, {}).get("price", 0)
+                if new_price and old_price and new_price < old_price:
+                    if compare and compare > new_price:
+                        base_price, compare_txt = compare, f"~~¥{compare:,}~~ →"
+                    else:
+                        base_price, compare_txt = old_price, f"¥{old_price:,} →"
+                    discount = round((1 - new_price / base_price) * 100)
+                    if discount >= 2:
+                        sku_image = info.get("image", "")
+                        events.append({"type": "SALE", "product_name": info["name"], "sku": "全色", "number": info.get("number", ""), "url": url, "image": sku_image, "new_price": new_price, "discount": f"{discount}%", "compare_txt": compare_txt, "time": datetime.now().isoformat()})
+                        logger.info(f"💰 折扣: {info['name']} ¥{old_price:,}→¥{new_price:,}")
 
     logger.info(f"本轮扫描完成: {len(new_state)} 个商品, {len(events)} 个变化")
 
@@ -426,9 +473,13 @@ def main():
     final_state.update(new_state)
     final_state["_cursor"] = next_cursor
     final_state["_seen_urls"] = sorted(seen_urls)
+    # 价格必须 merge 而不是覆盖：游标制每轮只扫一段，覆盖会把未扫段的价格记录清空，
+    # 导致下轮扫到时无旧价可比、折扣检测失效
+    merged_prices = dict(prev.get("_prices", {}))
+    merged_prices.update(new_prices)
+    final_state["_prices"] = merged_prices
     save_state(final_state)
     logger.info(f"状态已保存（下一轮从第 {next_cursor} 个开始，已记录 {len(seen_urls)} 个商品）")
 
 if __name__ == "__main__":
     main()
-
