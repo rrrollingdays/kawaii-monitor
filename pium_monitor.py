@@ -68,6 +68,7 @@ def fetch_url_with_retry(url, retries=3, base_delay=2):
                 time.sleep(base_delay * (2 ** (attempt - 1)))
                 continue
             raise
+
 def fetch_json(url):
     """抓取 JSON 接口"""
     text = fetch_url_with_retry(url)
@@ -160,13 +161,9 @@ def send_bark(title, desp):
     if not BARK_URL:
         logger.warning("Bark 未配置，跳过")
         return False
-    m = re.search(r'src="([^"]+)"', desp)
-    image_url = m.group(1) if m else ""
     text = re.sub(r"<[^>]+>", "", desp)
     text = text.replace("**", "").replace("### ", "")[:900]
     payload = {"title": title[:60], "body": text, "group": "kawaii-monitor", "level": "timeSensitive"}
-    if image_url:
-        payload["image"] = image_url
     try:
         req = Request(BARK_URL, data=json.dumps(payload).encode("utf-8"),
                       headers={"Content-Type": "application/json; charset=utf-8"})
@@ -186,12 +183,38 @@ def notify_events(events):
     soldout_events = [e for e in events if e["type"] == "SOLD_OUT"]
     restock_events = [e for e in events if e["type"] == "RESTOCK"]
     new_events = [e for e in events if e["type"] == "NEW"]
+    sale_events = [e for e in events if e["type"] == "SALE"]
     if new_events:
         _notify_new(new_events)
+    if sale_events:
+        _notify_sale(sale_events)
     if soldout_events:
         _notify_soldout(soldout_events)
     if restock_events:
         _notify_restock(restock_events)
+
+def _notify_sale(events):
+    if len(events) == 1:
+        e = events[0]
+        subject = f"💰 [pium] 折扣: {e['product_name']} -{e['discount']}"
+        title = f"[pium]折扣:{e['product_name'][:15]} -{e['discount']}"
+    else:
+        subject = f"💰 [pium] {len(events)} 个SKU限时折扣"
+        title = f"[pium]{len(events)}个折扣"
+    rows = ""
+    for e in events:
+        img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("number", "")}</span></td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#c0392b;font-weight:bold;">¥{e["new_price"]:,}（-{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+    body = f'<html><body><h2 style="color:#c0392b;">💰 [pium] 限时折扣</h2><p>{len(events)} 个SKU降价:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
+    desp = "### [pium] 限时折扣\n\n"
+    for e in events:
+        desp += f"**{e['product_name']}**\n- SKU: {e['sku']}\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（-{e['discount']}）\n- [查看商品]({e['url']})\n"
+        if e.get("image"):
+            desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
+        desp += "\n"
+    send_email(subject, body)
+    send_wechat(title, desp)
+    send_bark(title, desp)
 
 def _notify_soldout(events):
     if len(events) == 1:
@@ -284,7 +307,7 @@ def main():
         notify_events([
             {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "sku": "グレー / Free", "number": "1026a070301181", "url": "https://piumofficial.com/products/test", "time": datetime.now().isoformat()},
             {"type": "RESTOCK", "product_name": "【测试-补货】", "sku": "ブラック / Free", "number": "1026a070301181", "url": "https://piumofficial.com/products/test", "time": datetime.now().isoformat()},
-            {"type": "NEW", "product_name": "【测试-上新】", "sku": "ピンク / Free", "number": "1026a070301181", "url": "https://piumofficial.com/products/test", "time": datetime.now().isoformat()},
+            {"type": "SALE", "product_name": "【测试-折扣】", "sku": "ホワイト / Free", "number": "1026a070301181", "url": "https://piumofficial.com/products/test", "image": "https://cdn.shopify.com/s/files/1/0718/1978/8362/files/171_F_1_76059f89-25df-4140-b465-fd60cc528abd.jpg", "new_price": 8400, "discount": "30%", "compare_txt": "~~¥12,000~~ →", "time": datetime.now().isoformat()},
         ])
         return
 
@@ -317,6 +340,7 @@ def main():
         logger.info(f"pium 监控启动: 本轮全量扫描 {len(products)} 个商品 (已有状态 {products_with_skus} 个)")
 
     new_state = {}
+    new_prices = {}
     events = []
 
     for p in products:
@@ -325,9 +349,10 @@ def main():
             continue
         url = f"{BASE_URL}/products/{handle}"
 
-        # 解析全部 SKU 状态（JSON 的 available 字段）
+        # 解析全部 SKU 状态（JSON 的 available 字段）+ 价格
         variants = p.get("variants", [])
         cur = {}
+        cur_prices = {}
         img_by_name = {}
         for v in variants:
             vname = v.get("title") or v.get("option1") or str(v.get("id", ""))
@@ -335,6 +360,13 @@ def main():
                 continue
             if "available" in v:
                 cur[vname] = not v["available"]
+            try:
+                pr = int(float(v.get("price") or 0))
+                cp = int(float(v.get("compare_at_price") or 0))
+            except Exception:
+                pr, cp = 0, 0
+            if pr:
+                cur_prices[vname] = {"price": pr, "compare": cp if cp > pr else 0}
             fi = v.get("featured_image") or {}
             src = clean_img_url(fi.get("src", ""))
             if src:
@@ -344,6 +376,7 @@ def main():
 
         name = p.get("title", handle)
         new_state[url] = {"name": name, "skus": cur}
+        new_prices[url] = cur_prices
 
         # 主图
         images = p.get("images", [])
@@ -379,6 +412,30 @@ def main():
                     events.append({"type": "RESTOCK", "product_name": name, "sku": sn, "number": product_number, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"📦 补货: {name} - {sn}")
 
+        # ===== 折扣检测（新商品本轮只记录价格，次轮起对比）=====
+        if is_new:
+            continue
+        prev_prices = prev.get("_prices", {}).get(url, {})
+        for sn, cp_info in cur_prices.items():
+            old = prev_prices.get(sn)
+            if not old:
+                continue
+            old_price = old.get("price", 0)
+            new_price = cp_info["price"]
+            if not old_price or new_price >= old_price:
+                continue
+            compare = cp_info.get("compare") or 0
+            if compare and compare > new_price:
+                base_price, compare_txt = compare, f"~~¥{compare:,}~~ →"
+            else:
+                base_price, compare_txt = old_price, f"¥{old_price:,} →"
+            discount = round((1 - new_price / base_price) * 100)
+            if discount < 2:   # 忽略 <2% 的微调（防含税调整误报）
+                continue
+            sku_image = img_by_name.get(sn, "") or main_image
+            events.append({"type": "SALE", "product_name": name, "sku": sn, "number": product_number, "url": url, "image": sku_image, "new_price": new_price, "discount": f"{discount}%", "compare_txt": compare_txt, "time": datetime.now().isoformat()})
+            logger.info(f"💰 折扣: {name} - {sn} ¥{old_price:,}→¥{new_price:,}")
+
     logger.info(f"本轮扫描完成: {len(new_state)} 个商品, {len(events)} 个变化")
 
     if first_run:
@@ -393,6 +450,7 @@ def main():
     final_state.update(new_state)
     final_state.pop("_cursor", None)  # 旧版遗留字段，不再需要
     final_state["_seen_urls"] = sorted(seen_urls)
+    final_state["_prices"] = new_prices
     save_state(final_state)
     logger.info(f"状态已保存（已记录 {len(seen_urls)} 个商品）")
 
