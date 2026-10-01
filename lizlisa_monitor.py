@@ -46,6 +46,7 @@ def resolve_recipients():
         rcp = [SMTP_USER]
     return rcp
 SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY", "")
+ENABLE_WECHAT = False     # 微信推送总开关（当前停用，改为 True 恢复）
 BARK_URL = os.environ.get("BARK_URL", "").rstrip("/")
 MAX_WORKERS = 5         # 并发抓取数（调低防限流）
 MAX_PER_RUN = 100       # 每轮最多扫描的商品数（分批防限流）
@@ -89,6 +90,9 @@ def send_email(subject, body_html):
     return False
 
 def send_wechat(title, desp):
+    # 微信推送已停用（Server酱）。如需恢复，把 ENABLE_WECHAT 改回 True 即可。
+    if not ENABLE_WECHAT:
+        return False
     if not SERVERCHAN_KEY:
         return False
     url = f"https://sctapi.ftqq.com/{SERVERCHAN_KEY}.send"
