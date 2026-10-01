@@ -32,6 +32,19 @@ SMTP_SERVER = "smtp.gmail.com"
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "")
+
+
+# —— 邮件收件人黑名单 ——
+# rrrollingdays@gmail.com 不再接收任何监控邮件（其他收件人不受影响）。
+# 过滤后若无人可发，退化为只发给 SMTP 发信账号自己，避免"无收件人"报错。
+BLOCKED_EMAILS = {"rrrollingdays@gmail.com"}
+
+def resolve_recipients():
+    rcp = [x.strip() for x in EMAIL_TO.split(",") if x.strip()]
+    rcp = [x for x in rcp if x.lower() not in BLOCKED_EMAILS]
+    if not rcp and SMTP_USER:
+        rcp = [SMTP_USER]
+    return rcp
 SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY", "")
 BARK_URL = os.environ.get("BARK_URL", "").rstrip("/")
 MAX_WORKERS = 5         # 并发抓取数（调低防限流）
@@ -45,10 +58,11 @@ logger = logging.getLogger("monitor")
 
 # ======================== 通知 ========================
 def send_email(subject, body_html):
-    if not SMTP_USER or not SMTP_PASSWORD or not EMAIL_TO:
+    recipients = resolve_recipients()
+    if not SMTP_USER or not SMTP_PASSWORD or not recipients:
         return False
     msg = MIMEMultipart("alternative")
-    msg["From"] = SMTP_USER; msg["To"] = EMAIL_TO; msg["Subject"] = subject
+    msg["From"] = SMTP_USER; msg["To"] = ", ".join(recipients); msg["Subject"] = subject
     msg.attach(MIMEText(re.sub(r'<[^>]+>', '', body_html), "plain", "utf-8"))
     msg.attach(MIMEText(body_html, "html", "utf-8"))
     ctx = ssl.create_default_context()
@@ -59,11 +73,11 @@ def send_email(subject, body_html):
                     with smtplib.SMTP(SMTP_SERVER, 587, timeout=25) as s:
                         s.ehlo(); s.starttls(context=ctx); s.ehlo()
                         s.login(SMTP_USER, SMTP_PASSWORD)
-                        s.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
+                        s.sendmail(SMTP_USER, recipients, msg.as_string())
                 else:
                     with smtplib.SMTP_SSL(SMTP_SERVER, 465, context=ctx, timeout=25) as s:
                         s.login(SMTP_USER, SMTP_PASSWORD)
-                        s.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
+                        s.sendmail(SMTP_USER, recipients, msg.as_string())
                 logger.info(f"邮件已发送: {subject}")
                 return True
             except Exception as e:
