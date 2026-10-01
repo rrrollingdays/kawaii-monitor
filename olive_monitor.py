@@ -29,8 +29,8 @@ BRAND = "olivedesolive"
 LIST_URL = f"{BASE_URL}/display/display/?mode=zSearch&SearchItem.SORT_KEY=RELEASE_DM&b={BRAND}"
 MAX_PAGES = 8            # 列表页最多翻 8 页（当前 4 页够用）
 REQUEST_TIMEOUT = 25
-LIST_PAGE_DELAY = 2      # 列表页翻页间隔
-ITEM_DELAY = 0.4         # 详情页请求间隔（对服务器友好）
+LIST_PAGE_DELAY = 3      # 列表页翻页间隔
+ITEM_DELAY = 1.2         # 详情页请求间隔（0.4s 会触发网站限流，返回拦截页导致解析为空）
 MAX_ITEM_FAILURE_RATE = 0.30   # 一轮内详情页失败率超 30% → 本轮作废
 ITEM_FAIL_CONFIRM = 3    # 商品连续 3 次抓取失败才认定下架移除
 
@@ -169,7 +169,8 @@ def fetch_item_state(gid):
         return None, 0, False
     skus, goods_price = parse_item_page(html)
     if not skus:
-        logger.warning(f"详情页解析为空（结构变化或被拦截）: {gid}")
+        t = re.search(r'<title>([^<]{0,50})', html)
+        logger.warning(f"详情页解析为空: {gid} | len={len(html)} | title={t.group(1).strip() if t else '无title'}")
         return None, 0, False
     return skus, goods_price, True
 
@@ -200,7 +201,7 @@ def send_email(subject, body_html):
             logger.info(f"邮件已发送: {subject}")
             return True
         except Exception as e:
-            logger.debug(f"端口{port}失败: {e}")
+            logger.warning(f"端口{port}失败: {type(e).__name__}: {e}")
     logger.error("邮件发送失败")
     return False
 
@@ -418,6 +419,7 @@ def main():
     new_goods_state = {}
     new_prices = {}
     failed = 0
+    consec_fail = 0   # 连续失败计数（限流退避用）
 
     for gid in targets:
         info = list_goods.get(gid) or prev_goods.get(gid, {})
@@ -426,6 +428,12 @@ def main():
             # 失败处理：连续失败达阈值 → 静默下架；否则沿用旧状态
             fail_count[gid] = fail_count.get(gid, 0) + 1
             failed += 1
+            consec_fail += 1
+            if consec_fail >= 3:
+                # 连续失败疑似被限流（拦截页/超时），冷却后继续，避免整轮报废
+                logger.warning(f"连续 {consec_fail} 个详情页失败，疑似限流，冷却 45s 后继续")
+                time.sleep(45)
+                consec_fail = 0
             if fail_count[gid] >= ITEM_FAIL_CONFIRM:
                 logger.warning(f"商品连续 {fail_count[gid]} 次抓取失败，从监控移除: {gid}")
                 fail_count.pop(gid, None)
@@ -436,6 +444,7 @@ def main():
             time.sleep(ITEM_DELAY)
             continue
 
+        consec_fail = 0
         fail_count.pop(gid, None)
         new_prices[gid] = goods_price
         name = info.get("name", "")
