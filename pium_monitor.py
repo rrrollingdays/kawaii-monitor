@@ -136,7 +136,7 @@ def send_email(subject, body_html):
             logger.info(f"邮件已发送: {subject}")
             return True
         except Exception as e:
-            logger.debug(f"端口{port}失败: {e}")
+            logger.warning(f"端口{port}失败: {type(e).__name__}: {e}")
     logger.error("邮件发送失败")
     return False
 
