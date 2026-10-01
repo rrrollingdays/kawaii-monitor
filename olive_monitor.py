@@ -23,6 +23,15 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 from urllib.parse import urlencode
 
+# curl_cffi（TLS 指纹伪装）：GitHub Actions 数据中心 IP 被 Palcloset 按 IP+TLS 指纹
+# 降级渲染——返回 title 正常但无 SKU 区块的页面版本（失败率曾达 62-64%）。
+# 用 impersonate="chrome124" 模拟真 Chrome 的 TLS/JA3 指纹可恢复完整页面。
+try:
+    from curl_cffi import requests as _creq
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+
 # ======================== 配置 ========================
 BASE_URL = "https://www.palcloset.jp"
 BRAND = "olivedesolive"
@@ -51,6 +60,16 @@ logger = logging.getLogger("olive-monitor")
 
 # ======================== 网络请求 ========================
 def fetch_url(url):
+    # 优先 curl_cffi：模拟 Chrome 124 的 TLS/JA3 指纹，防范按客户端指纹的反爬（当前虽是改版误判，保留作纵深防御）
+    if HAS_CURL_CFFI:
+        r = _creq.get(url, impersonate="chrome124", timeout=REQUEST_TIMEOUT,
+                      headers={"Accept-Language": "ja,en;q=0.9",
+                               "Accept": "text/html,application/xhtml+xml,*/*"})
+        if r.status_code >= 400:
+            # 统一转成 urllib HTTPError：429/503 由 fetch_url_with_retry 退避重试，404 等立即失败
+            raise HTTPError(url, r.status_code, f"HTTP {r.status_code}", None, None)
+        return r.text
+    # 兜底：本机无 curl_cffi 时走 urllib
     req = Request(url, headers={
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
         "Accept-Language": "ja,en;q=0.9",
@@ -128,7 +147,11 @@ def parse_item_page(html):
     dt 文本形态："FREE/在庫あり"、"M/在庫なし"、可附 deliveryplan（预约出荷）
     """
     colors = [(m.start(), m.group(1)) for m in re.finditer(r'cart_pic__desc__color">カラー：([^<]+)</p>', html)]
-    dls = [(m.start(), m.group(0)) for m in re.finditer(r'<dl class="clearfix f_wrap"[^>]*id="skuEvent"[^>]*>.*?</dl>', html, re.S)]
+    # 2024 改版：真实 SKU dl 从 <dl class="clearfix f_wrap" id="skuEvent"> 变为
+    # <dl class="cart_inbox clearfix f_wrap">（库存文本也从 "FREE/在庫あり" 变 "FREE/<span>在庫あり</span>"，
+    # 但子串判断和 size 提取逻辑不变）。打折商品还会追加 targetCoupon class（50%OFF 等），
+    # 所以 class 必须宽松匹配"包含 clearfix f_wrap"而不是前缀匹配。
+    dls = [(m.start(), m.group(0)) for m in re.finditer(r'<dl class="[^"]*clearfix f_wrap[^"]*"[^>]*>.*?</dl>', html, re.S)]
     if not dls:
         return {}
     skus = {}
