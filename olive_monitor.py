@@ -241,7 +241,7 @@ def send_email(subject, body_html):
                     with smtplib.SMTP_SSL(SMTP_SERVER, 465, context=ctx, timeout=25) as s:
                         s.login(SMTP_USER, SMTP_PASSWORD)
                         s.sendmail(SMTP_USER, recipients, msg.as_string())
-                logger.info(f"邮件已发送: {subject}")
+                logger.info(f"邮件已发送: {subject} | 收件人: {', '.join(recipients)}")
                 return True
             except Exception as e:
                 logger.warning(f"端口{port}失败: {type(e).__name__}: {e}")
