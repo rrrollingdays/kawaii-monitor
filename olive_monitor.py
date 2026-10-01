@@ -158,21 +158,27 @@ def parse_item_page(html):
     return skus, goods_price
 
 def fetch_item_state(gid):
-    """抓单商品详情页并解析。返回 (skus, goods_price, ok)"""
-    try:
-        html = fetch_url_with_retry(f"{BASE_URL}/display/item/{gid}/")
-    except HTTPError as e:
-        logger.warning(f"详情页 HTTP {e.code}: {gid}")
-        return None, 0, False
-    except Exception as e:
-        logger.warning(f"详情页抓取失败: {gid} {e}")
-        return None, 0, False
-    skus, goods_price = parse_item_page(html)
-    if not skus:
-        t = re.search(r'<title>([^<]{0,50})', html)
-        logger.warning(f"详情页解析为空: {gid} | len={len(html)} | title={t.group(1).strip() if t else '无title'}")
-        return None, 0, False
-    return skus, goods_price, True
+    """抓单商品详情页并解析。返回 (skus, goods_price, ok)
+    注：Palcloset CDN 会偶发返回无 SKU 区块的页面版本（title 正常、体积正常），
+    遇到空解析先等 5s 重抓一次，两次都空才算失败。"""
+    html = ""
+    for attempt in range(2):
+        try:
+            html = fetch_url_with_retry(f"{BASE_URL}/display/item/{gid}/")
+        except HTTPError as e:
+            logger.warning(f"详情页 HTTP {e.code}: {gid}")
+            return None, 0, False
+        except Exception as e:
+            logger.warning(f"详情页抓取失败: {gid} {e}")
+            return None, 0, False
+        skus, goods_price = parse_item_page(html)
+        if skus:
+            return skus, goods_price, True
+        if attempt == 0:
+            time.sleep(5)   # 疑似 CDN 抖动页，稍后重抓
+    t = re.search(r'<title>([^<]{0,50})', html)
+    logger.warning(f"详情页解析为空: {gid} | len={len(html)} | title={t.group(1).strip() if t else '无title'}")
+    return None, 0, False
 
 # ======================== 通知 ========================
 def send_email(subject, body_html):
