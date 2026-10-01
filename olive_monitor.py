@@ -187,22 +187,26 @@ def send_email(subject, body_html):
     msg.attach(MIMEText(re.sub(r'<[^>]+>', '', body_html), "plain", "utf-8"))
     msg.attach(MIMEText(body_html, "html", "utf-8"))
     ctx = ssl.create_default_context()
-    for port in [587, 465]:
-        try:
-            if port == 587:
-                with smtplib.SMTP(SMTP_SERVER, 587, timeout=15) as s:
-                    s.ehlo(); s.starttls(context=ctx); s.ehlo()
-                    s.login(SMTP_USER, SMTP_PASSWORD)
-                    s.sendmail(SMTP_USER, recipients, msg.as_string())
-            else:
-                with smtplib.SMTP_SSL(SMTP_SERVER, 465, context=ctx, timeout=15) as s:
-                    s.login(SMTP_USER, SMTP_PASSWORD)
-                    s.sendmail(SMTP_USER, recipients, msg.as_string())
-            logger.info(f"邮件已发送: {subject}")
-            return True
-        except Exception as e:
-            logger.warning(f"端口{port}失败: {type(e).__name__}: {e}")
-    logger.error("邮件发送失败")
+    for attempt in range(2):
+        for port in [587, 465]:
+            try:
+                if port == 587:
+                    with smtplib.SMTP(SMTP_SERVER, 587, timeout=25) as s:
+                        s.ehlo(); s.starttls(context=ctx); s.ehlo()
+                        s.login(SMTP_USER, SMTP_PASSWORD)
+                        s.sendmail(SMTP_USER, recipients, msg.as_string())
+                else:
+                    with smtplib.SMTP_SSL(SMTP_SERVER, 465, context=ctx, timeout=25) as s:
+                        s.login(SMTP_USER, SMTP_PASSWORD)
+                        s.sendmail(SMTP_USER, recipients, msg.as_string())
+                logger.info(f"邮件已发送: {subject}")
+                return True
+            except Exception as e:
+                logger.warning(f"端口{port}失败: {type(e).__name__}: {e}")
+        if attempt == 0:
+            logger.warning("587/465 两端口均失败，8s 后整体重试")
+            time.sleep(8)
+    logger.error("邮件发送失败（重试后仍失败）")
     return False
 
 def send_wechat(title, desp):
