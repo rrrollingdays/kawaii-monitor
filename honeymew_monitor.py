@@ -53,6 +53,7 @@ def resolve_recipients():
         rcp = [SMTP_USER]
     return rcp
 SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY", "")
+ENABLE_WECHAT = False     # 微信推送总开关（当前停用，改为 True 恢复）
 BARK_URL = os.environ.get("BARK_URL", "").rstrip("/")
 STATE_FILE = os.environ.get("STATE_FILE", "/tmp/honeymew_state.json")
 
@@ -222,6 +223,9 @@ def send_email(subject, body_html):
     return False
 
 def send_wechat(title, desp):
+    # 微信推送已停用（Server酱）。如需恢复，把 ENABLE_WECHAT 改回 True 即可。
+    if not ENABLE_WECHAT:
+        return False
     if not SERVERCHAN_KEY:
         logger.warning("Server酱未配置，跳过")
         return False
