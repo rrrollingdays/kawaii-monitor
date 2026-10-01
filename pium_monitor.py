@@ -28,6 +28,19 @@ SMTP_SERVER = "smtp.gmail.com"
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "")
+
+
+# —— 邮件收件人黑名单 ——
+# rrrollingdays@gmail.com 不再接收任何监控邮件（其他收件人不受影响）。
+# 过滤后若无人可发，退化为只发给 SMTP 发信账号自己，避免"无收件人"报错。
+BLOCKED_EMAILS = {"rrrollingdays@gmail.com"}
+
+def resolve_recipients():
+    rcp = [x.strip() for x in EMAIL_TO.split(",") if x.strip()]
+    rcp = [x for x in rcp if x.lower() not in BLOCKED_EMAILS]
+    if not rcp and SMTP_USER:
+        rcp = [SMTP_USER]
+    return rcp
 SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY", "")
 BARK_URL = os.environ.get("BARK_URL", "").rstrip("/")
 STATE_FILE = os.environ.get("STATE_FILE", "/tmp/pium_monitor_state.json")
@@ -111,7 +124,7 @@ def fetch_all_products():
     return products
 # ======================== 通知 ========================
 def send_email(subject, body_html):
-    recipients = [x.strip() for x in EMAIL_TO.split(",") if x.strip()]
+    recipients = resolve_recipients()
     if not SMTP_USER or not SMTP_PASSWORD or not recipients:
         logger.warning("邮件配置不完整，跳过")
         return False
