@@ -42,12 +42,6 @@ LIST_PAGE_DELAY = 3      # 列表页翻页间隔
 ITEM_DELAY = 1.2         # 详情页请求间隔（0.4s 会触发网站限流，返回拦截页导致解析为空）
 MAX_ITEM_FAILURE_RATE = 0.30   # 一轮内详情页失败率超 30% → 本轮作废
 ITEM_FAIL_CONFIRM = 3    # 商品连续 3 次抓取失败才认定下架移除
-# —— 横跳抑制（olive 是商品级监控，Palcloset 库存是颜色×尺码级，
-#    单色一件售出/取消就会被判定为"整品卖空/补货"，导致反复横跳刷屏）——
-# 冷却期内同商品的再次变化不发通知；冷却结束后只有"状态真的变了"才再推
-# （例：00:00 推"断货"，中间反复横跳全抑制，03:00 若仍是断货则不推；
-#   若 03:00 变成"补货"则推送，因为这是新信息）
-FLIP_COOLDOWN_HOURS = 2
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_USER = os.environ.get("SMTP_USER", "")
@@ -318,7 +312,7 @@ def _event_desp(events):
         desp += "\n"
     return desp
 
-def _notify_sale(events, dry=False):
+def _notify_sale(events):
     if len(events) == 1:
         e = events[0]
         subject = f"📉 [olive] 折扣: {e['product_name']} -{e['discount']}"
@@ -337,13 +331,11 @@ def _notify_sale(events, dry=False):
         if e.get("image"):
             desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
         desp += "\n"
-    if dry:
-        return f'<h4>{subject}</h4>' + body
     send_email(subject, body)
     send_wechat(title, desp)
     send_bark(title, desp)
 
-def _notify_priceup(events, dry=False):
+def _notify_priceup(events):
     if len(events) == 1:
         e = events[0]
         subject = f"📈 [olive] 回调: {e['product_name']} +{e['discount']}"
@@ -362,13 +354,11 @@ def _notify_priceup(events, dry=False):
         if e.get("image"):
             desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
         desp += "\n"
-    if dry:
-        return f'<h4>{subject}</h4>' + body
     send_email(subject, body)
     send_wechat(title, desp)
     send_bark(title, desp)
 
-def _notify_soldout(events, dry=False):
+def _notify_soldout(events):
     if len(events) == 1:
         e = events[0]
         subject = f"🚨 [olive] 卖空: {e['product_name']} - {e['sku']}"
@@ -378,13 +368,11 @@ def _notify_soldout(events, dry=False):
         title = f"[olive]{len(events)}个SKU卖空"
     body = f'<html><body><h2 style="color:#e74c3c;">🚨 [OLIVE des OLIVE] 商品卖空</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{_event_rows(events, "#e74c3c")}</table></body></html>'
     desp = "### [olive] 卖空\n\n" + _event_desp(events)
-    if dry:
-        return f'<h4>{subject}</h4>' + body
     send_email(subject, body)
     send_wechat(title, desp)
     send_bark(title, desp)
 
-def _notify_restock(events, dry=False):
+def _notify_restock(events):
     if len(events) == 1:
         e = events[0]
         subject = f"📦 [olive] 补货: {e['product_name']} - {e['sku']}"
@@ -394,13 +382,11 @@ def _notify_restock(events, dry=False):
         title = f"[olive]{len(events)}个SKU补货"
     body = f'<html><body><h2 style="color:#27ae60;">📦 [OLIVE des OLIVE] 补货通知</h2><p>{len(events)} 个SKU补货:</p><table style="border-collapse:collapse;">{_event_rows(events, "#27ae60")}</table></body></html>'
     desp = "### [olive] 补货通知\n\n" + _event_desp(events)
-    if dry:
-        return f'<h4>{subject}</h4>' + body
     send_email(subject, body)
     send_wechat(title, desp)
     send_bark(title, desp)
 
-def _notify_new(events, dry=False):
+def _notify_new(events):
     if len(events) == 1:
         e = events[0]
         subject = f"🆕 [olive] 上新: {e['product_name']} - {e['sku']}"
@@ -410,54 +396,9 @@ def _notify_new(events, dry=False):
         title = f"[olive]{len(events)}个上新"
     body = f'<html><body><h2 style="color:#e67e22;">🆕 [OLIVE des OLIVE] 上新通知</h2><p>{len(events)} 个SKU上新:</p><table style="border-collapse:collapse;">{_event_rows(events, "#e67e22")}</table></body></html>'
     desp = "### [olive] 上新通知\n\n" + _event_desp(events)
-    if dry:
-        return f'<h4>{subject}</h4>' + body
     send_email(subject, body)
     send_wechat(title, desp)
     send_bark(title, desp)
-
-def filter_flip_flapping(events, cooldown):
-    """横跳抑制：过滤掉冷却期内同商品的重复变化。
-
-    cooldown: {gid: {"t": ISO时间, "state": "OUT"/"OK"}} —— 上次"成功推送"时的状态与时间
-    返回 (保留的事件, 更新后的 cooldown)
-
-    规则：
-      1. 冷却期内（< FLIP_COOLDOWN_HOURS）同商品的任何变化 → 丢弃
-      2. 冷却期外：
-         - 若当前状态 == 上次推送状态（横跳后又回到原样）→ 丢弃（无新信息）
-         - 否则 → 推送，并刷新记录
-      注：NEW/SALE/PRICE_UP 不参与横跳抑制（上新和价格变化本身就是有效信息）
-    """
-    if not events:
-        return events, cooldown
-    now = datetime.now()
-    keep = []
-    for e in events:
-        etype = e.get("type")
-        if etype not in ("SOLD_OUT", "RESTOCK"):
-            keep.append(e)
-            continue
-        gid = e.get("number")
-        cur_state = "OUT" if etype == "SOLD_OUT" else "OK"
-        rec = cooldown.get(gid)
-        if rec:
-            # 判定：距上次推送是否还在冷却期内
-            try:
-                last_t = datetime.fromisoformat(rec.get("t", ""))
-                in_cooldown = (now - last_t).total_seconds() < FLIP_COOLDOWN_HOURS * 3600
-            except Exception:
-                in_cooldown = False
-            if in_cooldown:
-                logger.info(f"⏸️ 横跳抑制(冷却中): {e.get('product_name')} - {e.get('sku')}")
-                continue
-            if rec.get("state") == cur_state:
-                # 横跳一圈又回到原状态 → 无新信息，不推
-                logger.info(f"⏸️ 横跳抑制(状态未变): {e.get('product_name')} - {e.get('sku')}")
-                continue
-        keep.append(e)
-        cooldown[gid] = {"t": now.isoformat(), "state": cur_state}
-    return keep, cooldown
 
 def notify_events(events):
     if not events:
@@ -467,27 +408,16 @@ def notify_events(events):
     new = [e for e in events if e["type"] == "NEW"]
     sale = [e for e in events if e["type"] == "SALE"]
     priceup = [e for e in events if e["type"] == "PRICE_UP"]
-    # 一轮内所有事件合并成一封邮件（原来是每类一封，一轮常发 2-5 封）
-    sections = []
-    for label, evts, renderer in [
-        ("🆕 上新", new, lambda: _notify_new(new, dry=True)),
-        ("📉 折扣", sale, lambda: _notify_sale(sale, dry=True)),
-        ("📈 价格回调", priceup, lambda: _notify_priceup(priceup, dry=True)),
-        ("🚨 卖空", soldout, lambda: _notify_soldout(soldout, dry=True)),
-        ("📦 补货", restock, lambda: _notify_restock(restock, dry=True)),
-    ]:
-        if evts:
-            sections.append(renderer())
-    if sections:
-        subject = f"[olive] {len(events)} 个变化"
-        body = "<h3>OLIVE des OLIVE 监控</h3>" + "<hr>".join(sections)
-        desp = f"共 {len(events)} 个变化\n" + "\n".join(
-            f"{k}: {len(v)} 个" for k, v in
-            [("上新", new), ("折扣", sale), ("回调", priceup), ("卖空", soldout), ("补货", restock)] if v
-        )
-        send_email(subject, body)
-        send_wechat(f"[olive]{len(events)}个变化", desp)
-        send_bark(f"[olive]{len(events)}个变化", desp)
+    if new:
+        _notify_new(new)
+    if sale:
+        _notify_sale(sale)
+    if priceup:
+        _notify_priceup(priceup)
+    if soldout:
+        _notify_soldout(soldout)
+    if restock:
+        _notify_restock(restock)
 
 # ======================== 状态管理 ========================
 def load_state():
@@ -529,7 +459,6 @@ def main():
     prev_goods = prev.get("_goods", {})           # {gid: {"name","image","url","skus":{}}}
     seen_goods = set(prev.get("_seen_goods", list(prev_goods.keys())))
     fail_count = prev.get("_fail_count", {})
-    cooldown = prev.get("_cooldown", {})          # {gid: {"t","state"}} 横跳抑制记录
 
     # 目标集合 = 当轮列表 ∪ 历史见过（新商品自动纳入；列表抖动不再影响覆盖）
     targets = sorted(set(list_goods.keys()) | seen_goods)
@@ -633,14 +562,7 @@ def main():
     if first_run:
         logger.info(f"基线建立完成: {len(new_goods_state)} 商品已记录，下一轮开始正常监控")
     elif events:
-        # 横跳抑制：过滤冷却期内同商品的重复变化，避免反复刷屏
-        filtered, cooldown = filter_flip_flapping(events, cooldown)
-        if len(filtered) < len(events):
-            logger.info(f"横跳抑制: {len(events)} → {len(filtered)} 个事件")
-        if filtered:
-            notify_events(filtered)
-        else:
-            logger.info("本轮事件全部被横跳抑制")
+        notify_events(events)
     else:
         logger.info("本轮无变化")
 
@@ -650,7 +572,6 @@ def main():
         "_seen_goods": sorted(seen_goods),
         "_fail_count": fail_count,
         "_prices": new_prices,
-        "_cooldown": cooldown,
     })
     logger.info(f"状态已保存（{len(seen_goods)} 个商品）")
 
