@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 
 BASE = "https://tokyokawaiilife.com"
 GENRE_URL = BASE + "/index.php?genre_id={genre}&offset={offset}&lang_id=en&tsuka_conv=USD"
+SEARCH_URL = BASE + "/index.php?lang_id=en&genre_id=&keyword=&sch_goods_tag=&act=search&sortkey=&offset={offset}&tsuka_conv=USD"
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
@@ -124,35 +125,49 @@ def parse_cards(html):
         }
     return products
 
-# COMING SOON 预告商品（goodslist_box 区块：有名称无价格，尚未开卖）：
-# <a href="goods_en_USD_2651.html"><img ...></a> <span class="gd_name"> <a href="..."> <!-- COMING SOON--> 名称</a>
-# 必须带 COMING SOON 注释，避免把其他 gd_name 布局区块误判为预告
-CS_RE = re.compile(
-    r'goods_en_USD_(\d+)\.html"><img[^>]*></a>\s*<span class="gd_name">\s*<a href="[^"]*">'
-    r'\s*<!--[^>]*COMING\s*SOON[^>]*-->\s*(.*?)</a>', re.S)
+# COMING SOON 是搜索列表模板里每个商品名前的固定注释，不代表未开卖。
 
-def parse_coming_soon(html):
-    """解析 COMING SOON 预告商品 → {goods_id: name}"""
+# 全量目录布局（搜索结果页）：goodslist_box 块
+# <div class="goodslist_box">...<span class="gd_name"> <a href="...">名称</a></span>...<b>11,000&nbsp;JPY</b>...
+def parse_catalog(html):
+    """解析搜索结果页全量商品目录 → {goods_id: {name, price, image, hidden}}"""
     out = {}
-    for m in CS_RE.finditer(html):
-        gid = m.group(1)
-        name = re.sub(r"<!--.*?-->", "", m.group(2), flags=re.S).strip()
-        if gid not in out and name:
-            out[gid] = name
+    boxes = re.split(r'(?=<div class="goodslist_box")', html)
+    for b in boxes:
+        if not b.startswith('<div class="goodslist_box"'):
+            continue
+        gid_m = re.search(r'goods_en_USD_(\d+)\.html', b)
+        nm = re.search(r'<span class="gd_name">\s*<a href="[^"]*">\s*(.*?)</a>', b, re.S)
+        if not gid_m or not nm:
+            continue
+        gid = gid_m.group(1)
+        name = re.sub(r"<!--.*?-->", "", nm.group(1), flags=re.S).strip()
+        if not name or gid in out:
+            continue
+        prices = re.findall(r'<b>([\d,]+)\s*(?:&nbsp;)?\s*JPY</b>', b)
+        price = min(int(p.replace(",", "")) for p in prices) if prices else 0
+        im = re.search(r'<img src="(https://cdn\.multilingualcart\.com/[^"]*goods_img/goods_' + gid + r'[^"]*)"', b)
+        out[gid] = {
+            "name": name,
+            "price": price,
+            "image": im.group(1) if im else "",
+            "hidden": "display:none" in b[:100].replace(" ", "") or "display:none" in b[:100],
+        }
     return out
 
 # ======================== 商品发现与全量扫描 ========================
 
 def scan_all():
-    """扫描 → (商品卡片 {gid: info}, COMING SOON 预告 {gid: name})。
-    主数据源 = POST 搜索（不缓存、动态、最权威），辅以首页与各分类 GET 合并。
-    任一主源失败则抛异常（本轮放弃，保留旧状态）。"""
+    """扫描 → (在售状态卡片 {gid: info}, 全量目录 {gid: {name, price, image}})。
+    状态源 = POST 搜索 + 首页 + 各分类页（卡片布局，带 SOLD OUT 标记）
+    全量目录 = 搜索结果翻页 9 页（244 个商品，goodslist_box 布局）
+    主源失败则抛异常（本轮放弃，保留旧状态）。"""
     pages = []
-    pages.append(fetch_search())          # 主源：POST 搜索全部在售
+    pages.append(fetch_search())          # POST 搜索：在售卡片状态（不缓存）
     try:
-        pages.append(fetch_page(BASE + "/"))   # 首页（含 CS 预告区）
+        pages.append(fetch_page(BASE + "/"))   # 首页卡片（含 SOLD OUT 标记）
     except Exception as e:
-        logger.warning(f"首页抓取失败（跳过，不影响主源）: {e}")
+        logger.warning(f"首页抓取失败（跳过）: {e}")
     genres = sorted(set(re.findall(r'genre_id[=:"]+(\d+)', pages[0]))) or ["17", "18", "38", "70", "8"]
     logger.info(f"发现分类: {genres}")
     for genre in genres:
@@ -163,16 +178,30 @@ def scan_all():
         time.sleep(PAGE_DELAY)
 
     all_products = {}
-    all_coming_soon = {}
     for html in pages:
         cards = parse_cards(html)
         if cards is None:
-            continue   # 无效页跳过（主源失败已在 fetch 层抛出）
-        for gid, name in parse_coming_soon(html).items():
-            all_coming_soon.setdefault(gid, name)
+            continue
         for gid, info in cards.items():
             all_products.setdefault(gid, info)
-    return all_products, all_coming_soon
+
+    # 全量目录：搜索结果翻页（每页 30，共 ~9 页）
+    catalog = {}
+    for off in range(0, 300, 30):
+        try:
+            body = fetch_page(SEARCH_URL.format(offset=off))
+        except Exception as e:
+            logger.warning(f"目录页抓取失败（跳过）: offset={off} {e}")
+            continue
+        cat = parse_catalog(body)
+        for gid, info in cat.items():
+            catalog.setdefault(gid, info)
+        # 页码指示：超过总商品数即停
+        pager = re.search(r'\[\s*\d+\s*-\s*\d+\s*\]\s*of\s*\[\s*([\d,]+)\s*\]', body)
+        if pager and off + 30 >= int(pager.group(1).replace(",", "")):
+            break
+        time.sleep(PAGE_DELAY)
+    return all_products, catalog
 
 # ======================== 通知 ========================
 def send_email(subject, body_html):
@@ -373,7 +402,7 @@ def main():
         return
 
     try:
-        products, coming_soon = scan_all()
+        products, catalog = scan_all()
     except Exception as e:
         logger.error(f"本轮扫描失败（保留旧状态，不产生任何事件）: {e}")
         return
@@ -383,7 +412,7 @@ def main():
 
     prev = load_state()
     prev_products = {k: v for k, v in prev.items() if not k.startswith("_")}
-    prev_cs = prev.get("_coming_soon", {})
+    prev_catalog = prev.get("_catalog", {})
     is_baseline = not prev_products
 
     events = []
@@ -392,10 +421,8 @@ def main():
         prev_info = prev_products.get(gid)
         if prev_info is None:
             if not is_baseline:
-                # 曾以 COMING SOON 预告过的商品上架 = 上新（预告名可补充显示）
-                cs_note = f"（预告名: {prev_cs[gid]}）" if gid in prev_cs else ""
-                events.append({"type": "NEW", "product_name": info["name"] + cs_note, "url": url, "image": info["image"], "extra": f"JPY {info['price']:,}", "time": datetime.now().isoformat()})
-                logger.info(f"🆕 上新: {info['name']} {cs_note}")
+                events.append({"type": "NEW", "product_name": info["name"], "url": url, "image": info["image"], "extra": f"JPY {info['price']:,}", "time": datetime.now().isoformat()})
+                logger.info(f"🆕 上新: {info['name']}")
             continue
         # 卖空/补货（商品级）
         if info["sold_out"] and not prev_info.get("sold_out"):
@@ -419,21 +446,21 @@ def main():
                     events.append({"type": "SALE", "product_name": info["name"], "url": url, "image": info["image"], "new_price": new_price, "discount": f"-{drop}%", "extra": f"JPY {old_price:,} → ", "time": datetime.now().isoformat()})
                     logger.info(f"📉 折扣: {info['name']} ¥{old_price:,}→¥{new_price:,}")
 
-    logger.info(f"本轮扫描完成: {len(products)} 个在售商品, {len(coming_soon)} 个 COMING SOON 预告, {len(events)} 个变化")
+    logger.info(f"本轮扫描完成: {len(products)} 个在售/卖空商品, 目录 {len(catalog)}/{len(prev_catalog)} 个, {len(events)} 个变化")
 
-    # 已下架商品保留旧状态（分类页翻页抖动时不误报为消失）
-    final_state = {k: v for k, v in prev.items() if k.startswith("_")}
+    # 已下架商品保留旧状态（卡片布局消失不误报；重新出现时按旧 sold_out 状态触发补货）
+    final_state = {k: v for k, v in prev.items() if k.startswith("_") and k != "_catalog"}
     for gid, info in products.items():
         final_state[gid] = info
     for gid, old in prev_products.items():
         if gid not in products:
             final_state[gid] = old
             logger.info(f"本轮未扫到，保留旧状态: {old.get('name', gid)}")
-    final_state["_coming_soon"] = coming_soon
+    final_state["_catalog"] = catalog
     save_state(final_state)
 
     if is_baseline:
-        logger.info(f"首轮基线建立完成: {len(products)} 个商品已记录（另 {len(coming_soon)} 个预告），本轮不推送任何通知")
+        logger.info(f"首轮基线建立完成: {len(products)} 个在售商品已记录（全量目录 {len(catalog)} 个），本轮不推送任何通知")
     elif events:
         notify_events(events)
     else:
