@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""第十轮探测：CF 缓存机制定位与翻页绕过实验"""
-import re, time
+"""第十一轮探测：非卡片 ID 上下文 + 首页卡片数对照，确认全站在售数"""
+import re
 from curl_cffi import requests
 
 BASE = "https://tokyokawaiilife.com"
+s = requests.Session()
 
 def parse_cards(body):
     cards = {}
@@ -15,46 +16,28 @@ def parse_cards(body):
         name = re.sub(r"<!--.*?-->", "", nm.group(1), flags=re.S).strip()
         pm = re.search(r'<b>([\d,]+)\s*(?:&nbsp;)?\s*JPY</b>', inner)
         if not name or not pm: continue
-        cards[gid] = name[:30]
+        cards[gid] = {"name": name, "sold": bool(re.search(r'>\s*SOLD\s*OUT\s*<', inner))}
     return cards
 
-def ids_of(body):
-    return set(re.findall(r'goods_en_USD_(\d+)\.html', body))
+home = s.get(BASE + "/", impersonate="chrome124", timeout=25).text
+hcards = parse_cards(home)
+print("首页: 唯一ID", len(set(re.findall(r'goods_en_USD_(\d+)\.html', home))), "卡片", len(hcards), "其中SOLDOUT", sum(1 for v in hcards.values() if v['sold']))
 
-# 新 session
-s = requests.Session()
-s.get(BASE + "/", impersonate="chrome124", timeout=25)
+body = s.get(f"{BASE}/index.php?lang_id=en&act=search&tsuka_conv=USD&keyword=&genre_id=", impersonate="chrome124", timeout=25).text
+cards = parse_cards(body)
+print("搜索页: 唯一ID", len(set(re.findall(r'goods_en_USD_(\d+)\.html', body))), "卡片", len(cards), "其中SOLDOUT", sum(1 for v in cards.values() if v['sold']))
 
-U30 = f"{BASE}/index.php?lang_id=en&act=search&tsuka_conv=USD&keyword=&genre_id=&offset=30"
+# 非<a>卡片 ID 的上下文（每个打一段）
+in_a = set(m.group(1) for m in re.finditer(r'<a href="' + re.escape(BASE) + r'/goods_en_USD_(\d+)\.html', body))
+all_ids = set(re.findall(r'goods_en_USD_(\d+)\.html', body))
+extra = sorted(all_ids - in_a, key=int)
+print("\n非<a>卡片 ID 数:", len(extra))
+for gid in extra[:6]:
+    i = body.find(f"goods_en_USD_{gid}.html")
+    ctx = re.sub(r"\s+", " ", body[max(0, i-200):i+250])
+    print(f"\n--- {gid} @{i}\n{ctx[:420]}")
 
-# A. 同 URL 连抓 2 次
-a1 = s.get(U30, impersonate="chrome124", timeout=25).text
-a2 = s.get(U30, impersonate="chrome124", timeout=25).text
-print("A 同URL两次: 一致", a1 == a2, "| ID:", len(ids_of(a1)), len(ids_of(a2)), "| 卡片:", len(parse_cards(a1)), len(parse_cards(a2)))
-
-# B. 不同 query 顺序 / 加垃圾参数
-b1 = s.get(U30 + "&zzz=123", impersonate="chrome124", timeout=25).text
-b2 = s.get(f"{BASE}/index.php?tsuka_conv=USD&lang_id=en&act=search&genre_id=&keyword=&offset=30", impersonate="chrome124", timeout=25).text
-print("B 加参数/换序: 与A一致?", b1 == a1, b2 == a1, "| ID:", len(ids_of(b1)), len(ids_of(b2)))
-
-# C. POST + query 分页组合
-c1 = s.post(U30, data={"lang_id": "en", "act": "search", "tsuka_conv": "USD", "keyword": "", "genre_id": ""}, impersonate="chrome124", timeout=25).text
-print("C POST+query offset=30: ID:", len(ids_of(c1)), "卡片:", len(parse_cards(c1)))
-
-# D. 带假 cookie 绕缓存
-d1 = s.get(U30, impersonate="chrome124", timeout=25, headers={"Cookie": "cachebust=1; __cf_bm=x"}).text
-print("D 带假cookie: ID:", len(ids_of(d1)), "卡片:", len(parse_cards(d1)), "与A一致?", d1 == a1)
-
-# E. 全文 ID 上下文分类（58/120 个 ID 里多少在 <a> 卡片内）
-all_ids = ids_of(a1)
-in_a = set(m.group(1) for m in re.finditer(r'<a href="' + re.escape(BASE) + r'/goods_en_USD_(\d+)\.html', a1))
-print("E 页面唯一ID:", len(all_ids), "| 在<a>内:", len(in_a), "| 不在<a>内:", sorted(all_ids - in_a)[:15])
-
-# F. sleep 90s 后再抓（等缓存过期？）
-time.sleep(90)
-f1 = s.get(U30, impersonate="chrome124", timeout=25).text
-print("F 90s后再抓: 与A一致?", f1 == a1, "| ID:", len(ids_of(f1)), "卡片:", len(parse_cards(f1)))
-
-# G. 如果 F 有变化，继续 off60
-g1 = s.get(U30.replace("offset=30", "offset=60"), impersonate="chrome124", timeout=25).text
-print("G off60: ID:", len(ids_of(g1)), "卡片:", len(parse_cards(g1)), "样例:", list(parse_cards(g1))[:8])
+# 卡片商品名清单（给用户看的实锤）
+print("\n[全部在售卡片商品]")
+for gid, v in sorted(cards.items(), key=lambda x: int(x[0])):
+    print(f"  {gid} {'[SOLDOUT]' if v['sold'] else ''} {v['name'][:45]}")
