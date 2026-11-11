@@ -110,7 +110,7 @@ def parse_cards(html):
 # COMING SOON 预告商品（goodslist_box 区块：有名称无价格，尚未开卖）：
 # <a href="goods_en_USD_2651.html"><img ...></a> <span class="gd_name"> <a href="..."> <!-- COMING SOON--> 名称</a>
 CS_RE = re.compile(
-    r'goods_en_USD_(\d+)\.html"></a>\s*<span class="gd_name">\s*<a href="[^"]*">'
+    r'goods_en_USD_(\d+)\.html"><img[^>]*></a>\s*<span class="gd_name">\s*<a href="[^"]*">'
     r'(?:\s*<!--.*?-->)?\s*(.*?)</a>', re.S)
 
 def parse_coming_soon(html):
