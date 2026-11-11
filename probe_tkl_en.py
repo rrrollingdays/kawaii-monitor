@@ -1,68 +1,58 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""探测 tokyokawaiilife.com（LIZ 海外店，multilingualcart 平台）页面结构。
-输出精简结构摘要到日志，用于编写正式监控脚本。"""
+"""第二轮探测：session 保持 / 多指纹 / 分类页发现"""
 import re
 from curl_cffi import requests
 
 BASE = "https://tokyokawaiilife.com"
-UA_HEADERS = {"Accept-Language": "ja,en-US;q=0.9,zhcn;q=0.8"}
 
-def get(url):
-    r = requests.get(url, impersonate="chrome124", timeout=25, headers=UA_HEADERS)
-    body = r.text
-    blocked = ("Just a moment" in body[:8000]) or ("Attention Required" in body[:8000])
-    print(f"== GET {url} -> {r.status_code} len={len(body)} blocked={blocked}")
-    return body
+def try_get(s, url, imp=None):
+    kw = {"timeout": 25}
+    if imp:
+        kw["impersonate"] = imp
+    try:
+        r = s.get(url, **kw)
+        body = r.text
+        blocked = "Just a moment" in body[:8000] or "Attention Required" in body[:8000]
+        print(f"GET {url} -> {r.status_code} len={len(body)} blocked={blocked} (imp={imp or 'session-default'})")
+        return None if blocked or r.status_code != 200 else body
+    except Exception as e:
+        print(f"GET {url} ERR {str(e)[:100]}")
+        return None
 
-def clip(s, n=600):
-    return re.sub(r"\s+", " ", s)[:n]
+# --- A. session 首页 -> 商品页（zhcn 与 en 各试一次，多指纹） ---
+for imp in ["chrome131", "chrome124", "safari18_0"]:
+    s = requests.Session()
+    home = try_get(s, BASE + "/", imp)
+    if not home:
+        continue
+    # 分类导航发现
+    hrefs = re.findall(r'href="([^"]+)"', home)
+    paths = {}
+    for h in hrefs:
+        m = re.match(r"(?:https?://[^/]+)?/([a-zA-Z_0-9]+)\.(php|html)", h)
+        if m:
+            paths.setdefault(m.group(1).split("_")[0], h)
+    print("首页路径模式:", list(paths.keys())[:30])
+    for kind in ["goods_zhcn_USD_2684", "goods_en_USD_2684"]:
+        body = try_get(s, f"{BASE}/{kind}.html", imp)
+        if body:
+            t = re.search(r"<title>(.*?)</title>", body, re.S)
+            print(f"  title: {t.group(1).strip()[:80] if t else '?'}")
+            # 打印 soldout/库存/select 上下文
+            for kw in ["SOLD", "sold_out", "在庫", "stock", "select", "数量", "cart"]:
+                i = body.find(kw)
+                if i >= 0:
+                    print(f"  [{kw}] ...{re.sub(chr(92)+'s+',' ',body[max(0,i-200):i+300])[:420]}")
+            open("/tmp/tkl_goods_sample.html", "w").write(body)
+            break
+    break
 
-# ---------- 1. 首页：找链接模式 ----------
-home = get(BASE + "/")
-hrefs = re.findall(r'href="([^"]+)"', home)
-goods_links = [h for h in hrefs if "goods" in h]
-list_links = [h for h in hrefs if re.search(r"(list|cate|search)", h, re.I)]
-print("\n[首页 goods 链接样例]")
-for h in list(dict.fromkeys(goods_links))[:10]:
-    print("  ", h)
-print("[首页 list/cate 链接样例]")
-for h in list(dict.fromkeys(list_links))[:15]:
-    print("  ", h)
-
-# 首页上一个商品卡片的原始片段
-m = re.search(r'<[^>]+>.{0,200}goods_zhcn[^"]*\.html.{0,800}', home, re.S)
-if m:
-    print("\n[首页商品卡片片段]\n", clip(m.group(0), 1200))
-
-# ---------- 2. 列表页：抓第一个分类/列表链接 ----------
-list_url = None
-for h in list_links:
-    full = h if h.startswith("http") else BASE + "/" + h.lstrip("./")
-    if re.search(r"(list|cate|search)", h, re.I) and ".php" in h or "list" in h:
-        list_url = full
+# --- B. 不带 session 直接试商品页（对照） ---
+for imp in ["chrome131", "safari17_0"]:
+    r = requests.get(f"{BASE}/goods_en_USD_2684.html", impersonate=imp, timeout=25)
+    blocked = "Just a moment" in r.text[:8000]
+    print(f"direct goods_en -> {r.status_code} blocked={blocked} (imp={imp})")
+    if r.status_code == 200 and not blocked:
+        open("/tmp/tkl_goods_sample.html", "w").write(r.text)
         break
-if list_url:
-    lst = get(list_url)
-    gl = list(dict.fromkeys(re.findall(r'href="([^"]*goods[^"]*\.html[^"]*)"', lst)))[:10]
-    print("\n[列表页 goods 链接样例]", list_url)
-    for h in gl:
-        print("  ", h)
-    print("[列表页翻页控件]\n", clip(re.sub(r"<[^>]+>", "|", lst)[-3000:], 600))
-    m = re.search(r'<[^>]+>.{0,300}goods_zhcn[^"]*\.html.{0,1000}', lst, re.S)
-    if m:
-        print("\n[列表页商品卡片片段]\n", clip(m.group(0), 1500))
-
-# ---------- 3. 商品页 ----------
-p = get(BASE + "/goods_zhcn_USD_2684.html")
-print("\n[商品页 title]", re.search(r"<title>(.*?)</title>", p, re.S).group(1) if re.search(r"<title>(.*?)</title>", p, re.S) else "?")
-for kw in ["SOLD", "sold", "在庫", "stock", "cart", "Cart", "数量"]:
-    idxs = [m.start() for m in re.finditer(kw, p)][:3]
-    for i in idxs:
-        print(f"\n[商品页 '{kw}' 上下文 @{i}]\n", clip(p[max(0, i-250):i+350], 700))
-# 选项/下拉框
-for m in list(re.finditer(r"<select[^>]*>.*?</select>", p, re.S))[:3]:
-    print("\n[商品页 select]\n", clip(m.group(0), 800))
-# 价格区域
-for m in list(re.finditer(r"(USD|JPY|\\$|¥).{0,300}", p))[:5]:
-    print("\n[商品页价格片段]\n", clip(m.group(0), 350))
