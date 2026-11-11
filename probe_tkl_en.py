@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""第九轮探测：POST 搜索逐页翻页，查清全站商品总数与翻页机制"""
+"""第十轮探测：CF 缓存机制定位与翻页绕过实验"""
 import re, time
 from curl_cffi import requests
 
 BASE = "https://tokyokawaiilife.com"
-s = requests.Session()
 
 def parse_cards(body):
     cards = {}
@@ -16,54 +15,46 @@ def parse_cards(body):
         name = re.sub(r"<!--.*?-->", "", nm.group(1), flags=re.S).strip()
         pm = re.search(r'<b>([\d,]+)\s*(?:&nbsp;)?\s*JPY</b>', inner)
         if not name or not pm: continue
-        cards[gid] = {"name": name, "sold": bool(re.search(r'>\s*SOLD\s*OUT\s*<', inner))}
+        cards[gid] = name[:30]
     return cards
 
-# 1. 模拟真实用户：先 GET 首页拿 cookie
-home = s.get(BASE + "/", impersonate="chrome124", timeout=25).text
-print("首页 ok:", "Just a moment" not in home[:8000])
+def ids_of(body):
+    return set(re.findall(r'goods_en_USD_(\d+)\.html', body))
 
-# 2. POST 搜索（keyword 空 = 全部）
-r = s.post(BASE + "/", data={"lang_id": "en", "act": "search", "tsuka_conv": "USD", "keyword": "", "genre_id": ""}, impersonate="chrome124", timeout=25)
-body = r.text
-print("POST search:", r.status_code, "blocked:", "Just a moment" in body[:8000], "len:", len(body))
+# 新 session
+s = requests.Session()
+s.get(BASE + "/", impersonate="chrome124", timeout=25)
 
-# 3. 总件数文本（搜索结果页通常有 "N件" 或 "N items"）
-for m in re.finditer(r'>([^<>]{0,40}?[\d,]+\s*件[^<>]{0,20})<', body):
-    print("[件数]", m.group(1).strip())
-for m in re.finditer(r'([\d,]+)\s*(items?|results?|products?)', body, re.I):
-    print("[items 文本]", m.group(0), "上下文:", re.sub(r"\s+", " ", body[max(0,m.start()-100):m.end()+50])[:180])
+U30 = f"{BASE}/index.php?lang_id=en&act=search&tsuka_conv=USD&keyword=&genre_id=&offset=30"
 
-# 4. 翻页控件原样
-for m in list(re.finditer(r'<a[^>]+href="([^"]*)"[^>]*>\s*(?:&gt;|next|次へ|&rsaquo;|>\d+<)', body, re.I))[:6]:
-    print("[翻页链接]", m.group(1)[:130])
-# 所有含 offset/page 的链接
-for m in list(re.finditer(r'href="([^"]*(?:offset|page|start)[^"]*)"', body))[:8]:
-    print("[offset/page 链接]", m.group(1)[:130])
+# A. 同 URL 连抓 2 次
+a1 = s.get(U30, impersonate="chrome124", timeout=25).text
+a2 = s.get(U30, impersonate="chrome124", timeout=25).text
+print("A 同URL两次: 一致", a1 == a2, "| ID:", len(ids_of(a1)), len(ids_of(a2)), "| 卡片:", len(parse_cards(a1)), len(parse_cards(a2)))
 
-# 5. 逐页收集（尝试 offset=0,30,60...用 POST 方式）
-seen = {}
-for off in [0, 30, 60, 90, 120, 150]:
-    r = s.post(BASE + "/", data={"lang_id": "en", "act": "search", "tsuka_conv": "USD", "keyword": "", "genre_id": "", "offset": str(off)}, impersonate="chrome124", timeout=25)
-    if r.status_code != 200 or "Just a moment" in r.text[:8000]:
-        print(f"POST off{off}: BLOCKED"); continue
-    cards = parse_cards(r.text)
-    new = set(cards) - set(seen)
-    seen.update(cards)
-    print(f"POST off{off}: 卡片{len(cards)} 新{len(new)} 累计{len(seen)}")
-    time.sleep(2)
+# B. 不同 query 顺序 / 加垃圾参数
+b1 = s.get(U30 + "&zzz=123", impersonate="chrome124", timeout=25).text
+b2 = s.get(f"{BASE}/index.php?tsuka_conv=USD&lang_id=en&act=search&genre_id=&keyword=&offset=30", impersonate="chrome124", timeout=25).text
+print("B 加参数/换序: 与A一致?", b1 == a1, b2 == a1, "| ID:", len(ids_of(b1)), len(ids_of(b2)))
 
-# 6. GET 搜索形式翻页（act=search 放 query）
-for off in [0, 30, 60]:
-    r = s.get(f"{BASE}/?lang_id=en&act=search&tsuka_conv=USD&keyword=&genre_id=&offset={off}&_={int(time.time()*1000)}", impersonate="chrome124", timeout=25)
-    if r.status_code != 200 or "Just a moment" in r.text[:8000]:
-        print(f"GET-search off{off}: BLOCKED"); continue
-    cards = parse_cards(r.text)
-    new = set(cards) - set(seen)
-    seen.update(cards)
-    print(f"GET-search off{off}: 卡片{len(cards)} 新{len(new)} 累计{len(seen)}")
-    time.sleep(2)
+# C. POST + query 分页组合
+c1 = s.post(U30, data={"lang_id": "en", "act": "search", "tsuka_conv": "USD", "keyword": "", "genre_id": ""}, impersonate="chrome124", timeout=25).text
+print("C POST+query offset=30: ID:", len(ids_of(c1)), "卡片:", len(parse_cards(c1)))
 
-print("\n最终累计可解析商品:", len(seen))
-sold = [g for g, v in seen.items() if v["sold"]]
-print("其中 SOLD OUT:", len(sold), sold[:10])
+# D. 带假 cookie 绕缓存
+d1 = s.get(U30, impersonate="chrome124", timeout=25, headers={"Cookie": "cachebust=1; __cf_bm=x"}).text
+print("D 带假cookie: ID:", len(ids_of(d1)), "卡片:", len(parse_cards(d1)), "与A一致?", d1 == a1)
+
+# E. 全文 ID 上下文分类（58/120 个 ID 里多少在 <a> 卡片内）
+all_ids = ids_of(a1)
+in_a = set(m.group(1) for m in re.finditer(r'<a href="' + re.escape(BASE) + r'/goods_en_USD_(\d+)\.html', a1))
+print("E 页面唯一ID:", len(all_ids), "| 在<a>内:", len(in_a), "| 不在<a>内:", sorted(all_ids - in_a)[:15])
+
+# F. sleep 90s 后再抓（等缓存过期？）
+time.sleep(90)
+f1 = s.get(U30, impersonate="chrome124", timeout=25).text
+print("F 90s后再抓: 与A一致?", f1 == a1, "| ID:", len(ids_of(f1)), "卡片:", len(parse_cards(f1)))
+
+# G. 如果 F 有变化，继续 off60
+g1 = s.get(U30.replace("offset=30", "offset=60"), impersonate="chrome124", timeout=25).text
+print("G off60: ID:", len(ids_of(g1)), "卡片:", len(parse_cards(g1)), "样例:", list(parse_cards(g1))[:8])
