@@ -1,62 +1,61 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""第三轮探测：列表页 / sitemap / 首页卡片结构"""
+"""第四轮探测：首页 SOLD OUT 卡片结构 + 分类页发现"""
 import re
 from curl_cffi import requests
 
 BASE = "https://tokyokawaiilife.com"
 s = requests.Session()
 
-def get(url, quiet=False):
+def get(url):
     try:
         r = s.get(url, impersonate="chrome124", timeout=25)
-        blocked = "Just a moment" in r.text[:8000] or "Attention Required" in r.text[:8000]
-        if not quiet:
-            print(f"GET {url} -> {r.status_code} len={len(r.text)} blocked={blocked}")
-        return (r.status_code, r.text) if (r.status_code == 200 and not blocked) else (r.status_code, "")
+        blocked = "Just a moment" in r.text[:8000]
+        print(f"GET {url} -> {r.status_code} len={len(r.text)} blocked={blocked}")
+        return r.text if (r.status_code == 200 and not blocked) else ""
     except Exception as e:
         print(f"GET {url} ERR {str(e)[:90]}")
-        return 0, ""
+        return ""
 
-def clip(x, n=800):
+def clip(x, n=1000):
     return re.sub(r"\s+", " ", x)[:n]
 
-# 1. robots / sitemap
-get(BASE + "/robots.txt")
-st, sm = get(BASE + "/sitemap.xml", quiet=True)
-if sm:
-    print("[sitemap 前2条]", clip(sm, 500))
-    print("[sitemap 含goods数]", len(re.findall(r"goods_", sm)))
-    print("[sitemap 其他URL型]", sorted(set(re.findall(r"<loc>(https://[^<]*?)</loc>", sm)))[:20])
+home = get(BASE + "/")
+if not home:
+    raise SystemExit("home blocked")
 
-# 2. 首页全链接分组
-st, home = get(BASE + "/", quiet=True)
-links = re.findall(r'href="([^"]+)"', home)
-groups = {}
-for h in links:
-    m = re.search(r"/([^/?#]+)", h if h.startswith("http") else "https://x.com/" + h.lstrip("/"))
-    if m:
-        p = m.group(1)
-        key = re.sub(r"[\d]+", "N", p)
-        groups.setdefault(key, []).append(h)
-print("\n[首页链接模式汇总]")
-for k, v in sorted(groups.items()):
-    print(f"  {k} x{len(v)}  e.g. {v[0][:110]}")
+# 1. 首页所有相对路径分组（修正版）
+from urllib.parse import urlparse
+paths = {}
+for h in re.findall(r'href="([^"]+)"', home):
+    p = urlparse(h if h.startswith("http") else "https://tokyokawaiilife.com/" + h.lstrip("/"))
+    if p.netloc != "tokyokawaiilife.com":
+        continue
+    key = re.sub(r"\d+", "N", p.path.lstrip("/")) or "/"
+    paths.setdefault(key, []).append(p.query or "")
+print("[首页 path 模式]")
+for k, v in sorted(paths.items()):
+    print(f"  {k} x{len(v)}  query样例: {v[0][:80]}")
 
-# 3. 首页商品卡片完整片段（看有无 SOLD OUT/完売 标记、价格结构）
-i = home.find("goods_en_USD_")
-if i > 0:
-    print("\n[首页商品卡片片段]\n", clip(home[max(0,i-1500):i+1500], 2500))
-print("\n[首页 SOLDOUT/完売/Sold 关键词]", {kw: home.count(kw) for kw in ["SOLD", "Sold", "sold", "完売", "OUT"]})
+# 2. SOLD OUT 卡片完整结构（每个 SOLD OUT 位置的上下文）
+idxs = [m.start() for m in re.finditer("SOLD OUT", home)]
+print(f"\n[SOLD OUT 共 {len(idxs)} 处]")
+i = idxs[0]
+print("[第一个 SOLD OUT 上下文]\n", clip(home[max(0, i-2200):i+300], 3000))
 
-# 4. 商品页多语言/货币变体
-for variant in ["goods_en_JPY_2684.html", "goods_ja_JPY_2684.html", "goods_zhcn_JPY_2684.html", "goods_en_USD_2684.html?x=1"]:
-    st2, body = get(f"{BASE}/{variant}", quiet=True)
-    print(f"  variant {variant} -> {st2} {'BLOCKED' if not body else 'OK'}")
+# 3. SOLD OUT 与非 SOLD OUT 卡片对比：找第二个位置附近
+if len(idxs) > 1:
+    i2 = idxs[1]
+    print("\n[第二个 SOLD OUT 上下文]\n", clip(home[max(0, i2-800):i2+200], 1200))
 
-# 5. content.php 试探（若首页存在）
-m = re.search(r'href="([^"]*content[^"]*)"', home)
-if m:
-    st3, cbody = get(m.group(1) if m.group(1).startswith("http") else BASE + "/" + m.group(1).lstrip("/"))
-    if cbody:
-        print("[content页 goods链接数]", len(re.findall(r"goods_", cbody)))
+# 4. 有货卡片结构（取一个不出现在 SOLD OUT 附近的 goods 链接）
+# 找出所有 goods 链接出现位置及是否 1500 字符内含 SOLD OUT
+goods_pos = [m.start() for m in re.finditer(r'href="https://tokyokawaiilife\.com/goods_en_USD_(\d+)\.html"', home)]
+in_stock = None
+for gp in goods_pos:
+    seg = home[gp:gp+2500]
+    if "SOLD OUT" not in seg:
+        in_stock = gp
+        break
+if in_stock:
+    print("\n[有货卡片上下文]\n", clip(home[max(0, in_stock-300):in_stock+2200], 3000))
