@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""第四轮探测：首页 SOLD OUT 卡片结构 + 分类页发现"""
+"""第五轮探测：分类页/搜索页能否访问并列出全部商品"""
 import re
 from curl_cffi import requests
 
 BASE = "https://tokyokawaiilife.com"
 s = requests.Session()
+
+def clip(x, n=1200):
+    return re.sub(r"\s+", " ", x)[:n]
 
 def get(url):
     try:
@@ -17,45 +20,43 @@ def get(url):
         print(f"GET {url} ERR {str(e)[:90]}")
         return ""
 
-def clip(x, n=1000):
-    return re.sub(r"\s+", " ", x)[:n]
-
 home = get(BASE + "/")
-if not home:
-    raise SystemExit("home blocked")
+# 1. 收集所有 genre_id
+genres = sorted(set(re.findall(r'genre_id[=:"]+(\d+)', home)))
+print("[首页出现的 genre_id]", genres)
 
-# 1. 首页所有相对路径分组（修正版）
-from urllib.parse import urlparse
-paths = {}
-for h in re.findall(r'href="([^"]+)"', home):
-    p = urlparse(h if h.startswith("http") else "https://tokyokawaiilife.com/" + h.lstrip("/"))
-    if p.netloc != "tokyokawaiilife.com":
-        continue
-    key = re.sub(r"\d+", "N", p.path.lstrip("/")) or "/"
-    paths.setdefault(key, []).append(p.query or "")
-print("[首页 path 模式]")
-for k, v in sorted(paths.items()):
-    print(f"  {k} x{len(v)}  query样例: {v[0][:80]}")
-
-# 2. SOLD OUT 卡片完整结构（每个 SOLD OUT 位置的上下文）
-idxs = [m.start() for m in re.finditer("SOLD OUT", home)]
-print(f"\n[SOLD OUT 共 {len(idxs)} 处]")
-i = idxs[0]
-print("[第一个 SOLD OUT 上下文]\n", clip(home[max(0, i-2200):i+300], 3000))
-
-# 3. SOLD OUT 与非 SOLD OUT 卡片对比：找第二个位置附近
-if len(idxs) > 1:
-    i2 = idxs[1]
-    print("\n[第二个 SOLD OUT 上下文]\n", clip(home[max(0, i2-800):i2+200], 1200))
-
-# 4. 有货卡片结构（取一个不出现在 SOLD OUT 附近的 goods 链接）
-# 找出所有 goods 链接出现位置及是否 1500 字符内含 SOLD OUT
-goods_pos = [m.start() for m in re.finditer(r'href="https://tokyokawaiilife\.com/goods_en_USD_(\d+)\.html"', home)]
-in_stock = None
-for gp in goods_pos:
-    seg = home[gp:gp+2500]
-    if "SOLD OUT" not in seg:
-        in_stock = gp
+# 2. GET 分类页（多试几个）
+for gid in genres[:4]:
+    body = get(f"{BASE}/index.php?genre_id={gid}&lang_id=en&tsuka_conv=USD")
+    if body:
+        cards = re.findall(r'href="https://tokyokawaiilife\.com/goods_en_USD_(\d+)\.html"', body)
+        sold = body.count("SOLD OUT")
+        print(f"  genre {gid}: 商品卡片 {len(cards)} 个, SOLD OUT {sold} 处")
+        # 翻页控件
+        pager = re.findall(r'(page|p|offset|start)[=_"]+(\d+)', body)[:8]
+        print("  翻页参数候选:", pager)
+        # 搜索结果卡片结构片段
+        m = re.search(r'goods_en_USD_\d+\.html.{0,1200}', body, re.S)
+        if m and gid == genres[0]:
+            print("  [分类页卡片片段]\n", clip(m.group(0), 1500))
         break
-if in_stock:
-    print("\n[有货卡片上下文]\n", clip(home[max(0, in_stock-300):in_stock+2200], 3000))
+
+# 3. POST 搜索（keyword 留空 = 全部？）
+for gid in [None] + genres[:2]:
+    data = {"lang_id": "en", "act": "search", "tsuka_conv": "USD", "keyword": ""}
+    if gid:
+        data["genre_id"] = gid
+    try:
+        r = s.post(BASE + "/", data=data, impersonate="chrome124", timeout=25)
+        blocked = "Just a moment" in r.text[:8000]
+        n = len(re.findall(r'goods_en_USD_(\d+)\.html', r.text)) if not blocked else 0
+        sold = r.text.count("SOLD OUT") if not blocked else 0
+        print(f"POST search genre={gid} -> {r.status_code} len={len(r.text)} blocked={blocked} 卡片={n} SOLDOUT={sold}")
+        if not blocked and n:
+            ids = sorted(set(re.findall(r'goods_en_USD_(\d+)\.html', r.text)))
+            print("  商品ID样例:", ids[:15], "... 共", len(ids))
+            m = re.search(r'(検索結果|search result|results?|件)', r.text)
+            print("  结果数字:", clip(m.group(0) if m else "?", 200))
+            break
+    except Exception as e:
+        print(f"POST search ERR {str(e)[:90]}")
