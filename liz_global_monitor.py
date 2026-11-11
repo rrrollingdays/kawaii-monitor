@@ -56,7 +56,7 @@ def get_session():
     return _session
 
 def fetch_page(url, retries=3, base_delay=10):
-    """curl_cffi 指纹抓取，403/429 退避重试；被 CF 拦截视为失败"""
+    """curl_cffi 指纹 GET，403/429 退避重试；被 CF 拦截视为失败"""
     s = get_session()
     for attempt in range(1, retries + 1):
         try:
@@ -70,6 +70,23 @@ def fetch_page(url, retries=3, base_delay=10):
         if attempt < retries:
             time.sleep(base_delay * 2 ** (attempt - 1))
     raise RuntimeError(f"抓取失败（重试后仍失败）: {url}")
+
+def fetch_search(retries=3, base_delay=10):
+    """POST 搜索全部在售商品（POST 不走 CF 缓存，是唯一稳定的动态数据源）"""
+    s = get_session()
+    for attempt in range(1, retries + 1):
+        try:
+            r = s.post(BASE + "/", data={"lang_id": "en", "act": "search", "tsuka_conv": "USD", "keyword": "", "genre_id": ""},
+                       impersonate="chrome124", timeout=REQUEST_TIMEOUT)
+            body = r.text
+            if r.status_code == 200 and "Just a moment" not in body[:8000]:
+                return body
+            logger.warning(f"搜索 HTTP {r.status_code}，重试 ({attempt}/{retries})")
+        except Exception as e:
+            logger.warning(f"搜索异常: {e}，重试 ({attempt}/{retries})")
+        if attempt < retries:
+            time.sleep(base_delay * 2 ** (attempt - 1))
+    raise RuntimeError("搜索抓取失败（重试后仍失败）")
 
 # ======================== 解析 ========================
 # 卡片统一结构：<a href="goods_en_USD_{id}.html"> ... </a> 内含
@@ -109,9 +126,10 @@ def parse_cards(html):
 
 # COMING SOON 预告商品（goodslist_box 区块：有名称无价格，尚未开卖）：
 # <a href="goods_en_USD_2651.html"><img ...></a> <span class="gd_name"> <a href="..."> <!-- COMING SOON--> 名称</a>
+# 必须带 COMING SOON 注释，避免把其他 gd_name 布局区块误判为预告
 CS_RE = re.compile(
     r'goods_en_USD_(\d+)\.html"><img[^>]*></a>\s*<span class="gd_name">\s*<a href="[^"]*">'
-    r'(?:\s*<!--.*?-->)?\s*(.*?)</a>', re.S)
+    r'\s*<!--[^>]*COMING\s*SOON[^>]*-->\s*(.*?)</a>', re.S)
 
 def parse_coming_soon(html):
     """解析 COMING SOON 预告商品 → {goods_id: name}"""
@@ -124,41 +142,36 @@ def parse_coming_soon(html):
     return out
 
 # ======================== 商品发现与全量扫描 ========================
-def discover_genres():
-    """从首页收集所有分类 genre_id（缓存于 state 亦可，简单起见每轮重新发现）"""
-    home = fetch_page(BASE + "/")
-    genres = sorted(set(re.findall(r'genre_id[=:"]+(\d+)', home)))
-    return genres or ["17", "18", "38", "70", "8"]
 
 def scan_all():
-    """扫描所有分类页 → (商品卡片 {gid: info}, COMING SOON 预告 {gid: name})。
-    任一分类失败则抛异常（本轮放弃，保留旧状态）"""
-    genres = discover_genres()
+    """扫描 → (商品卡片 {gid: info}, COMING SOON 预告 {gid: name})。
+    主数据源 = POST 搜索（不缓存、动态、最权威），辅以首页与各分类 GET 合并。
+    任一主源失败则抛异常（本轮放弃，保留旧状态）。"""
+    pages = []
+    pages.append(fetch_search())          # 主源：POST 搜索全部在售
+    try:
+        pages.append(fetch_page(BASE + "/"))   # 首页（含 CS 预告区）
+    except Exception as e:
+        logger.warning(f"首页抓取失败（跳过，不影响主源）: {e}")
+    genres = sorted(set(re.findall(r'genre_id[=:"]+(\d+)', pages[0]))) or ["17", "18", "38", "70", "8"]
     logger.info(f"发现分类: {genres}")
+    for genre in genres:
+        try:
+            pages.append(fetch_page(GENRE_URL.format(genre=genre, offset=0)))
+        except Exception as e:
+            logger.warning(f"分类页抓取失败（跳过）: genre={genre} {e}")
+        time.sleep(PAGE_DELAY)
+
     all_products = {}
     all_coming_soon = {}
-    for genre in genres:
-        got_any = False
-        for offset in range(0, MAX_PAGES_PER_GENRE * 30, 30):
-            html = fetch_page(GENRE_URL.format(genre=genre, offset=offset))
-            cards = parse_cards(html)
-            if cards is None:
-                raise RuntimeError(f"分类页解析失败 genre={genre} offset={offset}")
-            for gid, name in parse_coming_soon(html).items():
-                all_coming_soon.setdefault(gid, name)
-            new_cnt = 0
-            for gid, info in cards.items():
-                if gid not in all_products:
-                    all_products[gid] = info
-                    new_cnt += 1
-            if new_cnt == 0 and offset > 0:
-                break   # 本页无新商品，翻页结束
-            got_any = True
-            if offset + 30 >= MAX_PAGES_PER_GENRE * 30:
-                break
-            time.sleep(PAGE_DELAY)
-        if got_any:
-            time.sleep(PAGE_DELAY)
+    for html in pages:
+        cards = parse_cards(html)
+        if cards is None:
+            continue   # 无效页跳过（主源失败已在 fetch 层抛出）
+        for gid, name in parse_coming_soon(html).items():
+            all_coming_soon.setdefault(gid, name)
+        for gid, info in cards.items():
+            all_products.setdefault(gid, info)
     return all_products, all_coming_soon
 
 # ======================== 通知 ========================
