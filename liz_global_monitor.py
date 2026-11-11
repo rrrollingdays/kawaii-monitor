@@ -107,6 +107,22 @@ def parse_cards(html):
         }
     return products
 
+# COMING SOON 预告商品（goodslist_box 区块：有名称无价格，尚未开卖）：
+# <a href="goods_en_USD_2651.html"><img ...></a> <span class="gd_name"> <a href="..."> <!-- COMING SOON--> 名称</a>
+CS_RE = re.compile(
+    r'goods_en_USD_(\d+)\.html"></a>\s*<span class="gd_name">\s*<a href="[^"]*">'
+    r'(?:\s*<!--.*?-->)?\s*(.*?)</a>', re.S)
+
+def parse_coming_soon(html):
+    """解析 COMING SOON 预告商品 → {goods_id: name}"""
+    out = {}
+    for m in CS_RE.finditer(html):
+        gid = m.group(1)
+        name = re.sub(r"<!--.*?-->", "", m.group(2), flags=re.S).strip()
+        if gid not in out and name:
+            out[gid] = name
+    return out
+
 # ======================== 商品发现与全量扫描 ========================
 def discover_genres():
     """从首页收集所有分类 genre_id（缓存于 state 亦可，简单起见每轮重新发现）"""
@@ -115,10 +131,12 @@ def discover_genres():
     return genres or ["17", "18", "38", "70", "8"]
 
 def scan_all():
-    """扫描所有分类页 → {goods_id: info}。任一分类失败则抛异常（本轮放弃，保留旧状态）"""
+    """扫描所有分类页 → (商品卡片 {gid: info}, COMING SOON 预告 {gid: name})。
+    任一分类失败则抛异常（本轮放弃，保留旧状态）"""
     genres = discover_genres()
     logger.info(f"发现分类: {genres}")
     all_products = {}
+    all_coming_soon = {}
     for genre in genres:
         got_any = False
         for offset in range(0, MAX_PAGES_PER_GENRE * 30, 30):
@@ -126,6 +144,8 @@ def scan_all():
             cards = parse_cards(html)
             if cards is None:
                 raise RuntimeError(f"分类页解析失败 genre={genre} offset={offset}")
+            for gid, name in parse_coming_soon(html).items():
+                all_coming_soon.setdefault(gid, name)
             new_cnt = 0
             for gid, info in cards.items():
                 if gid not in all_products:
@@ -139,7 +159,7 @@ def scan_all():
             time.sleep(PAGE_DELAY)
         if got_any:
             time.sleep(PAGE_DELAY)
-    return all_products
+    return all_products, all_coming_soon
 
 # ======================== 通知 ========================
 def send_email(subject, body_html):
@@ -340,7 +360,7 @@ def main():
         return
 
     try:
-        products = scan_all()
+        products, coming_soon = scan_all()
     except Exception as e:
         logger.error(f"本轮扫描失败（保留旧状态，不产生任何事件）: {e}")
         return
@@ -350,6 +370,7 @@ def main():
 
     prev = load_state()
     prev_products = {k: v for k, v in prev.items() if not k.startswith("_")}
+    prev_cs = prev.get("_coming_soon", {})
     is_baseline = not prev_products
 
     events = []
@@ -358,8 +379,10 @@ def main():
         prev_info = prev_products.get(gid)
         if prev_info is None:
             if not is_baseline:
-                events.append({"type": "NEW", "product_name": info["name"], "url": url, "image": info["image"], "extra": f"JPY {info['price']:,}", "time": datetime.now().isoformat()})
-                logger.info(f"🆕 上新: {info['name']}")
+                # 曾以 COMING SOON 预告过的商品上架 = 上新（预告名可补充显示）
+                cs_note = f"（预告名: {prev_cs[gid]}）" if gid in prev_cs else ""
+                events.append({"type": "NEW", "product_name": info["name"] + cs_note, "url": url, "image": info["image"], "extra": f"JPY {info['price']:,}", "time": datetime.now().isoformat()})
+                logger.info(f"🆕 上新: {info['name']} {cs_note}")
             continue
         # 卖空/补货（商品级）
         if info["sold_out"] and not prev_info.get("sold_out"):
@@ -383,7 +406,7 @@ def main():
                     events.append({"type": "SALE", "product_name": info["name"], "url": url, "image": info["image"], "new_price": new_price, "discount": f"-{drop}%", "extra": f"JPY {old_price:,} → ", "time": datetime.now().isoformat()})
                     logger.info(f"📉 折扣: {info['name']} ¥{old_price:,}→¥{new_price:,}")
 
-    logger.info(f"本轮扫描完成: {len(products)} 个商品, {len(events)} 个变化")
+    logger.info(f"本轮扫描完成: {len(products)} 个在售商品, {len(coming_soon)} 个 COMING SOON 预告, {len(events)} 个变化")
 
     # 已下架商品保留旧状态（分类页翻页抖动时不误报为消失）
     final_state = {k: v for k, v in prev.items() if k.startswith("_")}
@@ -393,10 +416,11 @@ def main():
         if gid not in products:
             final_state[gid] = old
             logger.info(f"本轮未扫到，保留旧状态: {old.get('name', gid)}")
+    final_state["_coming_soon"] = coming_soon
     save_state(final_state)
 
     if is_baseline:
-        logger.info(f"首轮基线建立完成: {len(products)} 个商品已记录，本轮不推送任何通知")
+        logger.info(f"首轮基线建立完成: {len(products)} 个商品已记录（另 {len(coming_soon)} 个预告），本轮不推送任何通知")
     elif events:
         notify_events(events)
     else:
