@@ -29,7 +29,7 @@ jobs:
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           BARK_URL: ${{ secrets.BARK_URL }}
           STATE_FILE: liz_global_state.json
-        run: python liz_global_monitor.py
+        run: python liz_global_monitor.py --test-notify
       - name: Save state
         run: |
           git config user.name "github-actions[bot]"
