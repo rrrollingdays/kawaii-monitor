@@ -1,58 +1,62 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""第二轮探测：session 保持 / 多指纹 / 分类页发现"""
+"""第三轮探测：列表页 / sitemap / 首页卡片结构"""
 import re
 from curl_cffi import requests
 
 BASE = "https://tokyokawaiilife.com"
+s = requests.Session()
 
-def try_get(s, url, imp=None):
-    kw = {"timeout": 25}
-    if imp:
-        kw["impersonate"] = imp
+def get(url, quiet=False):
     try:
-        r = s.get(url, **kw)
-        body = r.text
-        blocked = "Just a moment" in body[:8000] or "Attention Required" in body[:8000]
-        print(f"GET {url} -> {r.status_code} len={len(body)} blocked={blocked} (imp={imp or 'session-default'})")
-        return None if blocked or r.status_code != 200 else body
+        r = s.get(url, impersonate="chrome124", timeout=25)
+        blocked = "Just a moment" in r.text[:8000] or "Attention Required" in r.text[:8000]
+        if not quiet:
+            print(f"GET {url} -> {r.status_code} len={len(r.text)} blocked={blocked}")
+        return (r.status_code, r.text) if (r.status_code == 200 and not blocked) else (r.status_code, "")
     except Exception as e:
-        print(f"GET {url} ERR {str(e)[:100]}")
-        return None
+        print(f"GET {url} ERR {str(e)[:90]}")
+        return 0, ""
 
-# --- A. session 首页 -> 商品页（zhcn 与 en 各试一次，多指纹） ---
-for imp in ["chrome131", "chrome124", "safari18_0"]:
-    s = requests.Session()
-    home = try_get(s, BASE + "/", imp)
-    if not home:
-        continue
-    # 分类导航发现
-    hrefs = re.findall(r'href="([^"]+)"', home)
-    paths = {}
-    for h in hrefs:
-        m = re.match(r"(?:https?://[^/]+)?/([a-zA-Z_0-9]+)\.(php|html)", h)
-        if m:
-            paths.setdefault(m.group(1).split("_")[0], h)
-    print("首页路径模式:", list(paths.keys())[:30])
-    for kind in ["goods_zhcn_USD_2684", "goods_en_USD_2684"]:
-        body = try_get(s, f"{BASE}/{kind}.html", imp)
-        if body:
-            t = re.search(r"<title>(.*?)</title>", body, re.S)
-            print(f"  title: {t.group(1).strip()[:80] if t else '?'}")
-            # 打印 soldout/库存/select 上下文
-            for kw in ["SOLD", "sold_out", "在庫", "stock", "select", "数量", "cart"]:
-                i = body.find(kw)
-                if i >= 0:
-                    print(f"  [{kw}] ...{re.sub(chr(92)+'s+',' ',body[max(0,i-200):i+300])[:420]}")
-            open("/tmp/tkl_goods_sample.html", "w").write(body)
-            break
-    break
+def clip(x, n=800):
+    return re.sub(r"\s+", " ", x)[:n]
 
-# --- B. 不带 session 直接试商品页（对照） ---
-for imp in ["chrome131", "safari17_0"]:
-    r = requests.get(f"{BASE}/goods_en_USD_2684.html", impersonate=imp, timeout=25)
-    blocked = "Just a moment" in r.text[:8000]
-    print(f"direct goods_en -> {r.status_code} blocked={blocked} (imp={imp})")
-    if r.status_code == 200 and not blocked:
-        open("/tmp/tkl_goods_sample.html", "w").write(r.text)
-        break
+# 1. robots / sitemap
+get(BASE + "/robots.txt")
+st, sm = get(BASE + "/sitemap.xml", quiet=True)
+if sm:
+    print("[sitemap 前2条]", clip(sm, 500))
+    print("[sitemap 含goods数]", len(re.findall(r"goods_", sm)))
+    print("[sitemap 其他URL型]", sorted(set(re.findall(r"<loc>(https://[^<]*?)</loc>", sm)))[:20])
+
+# 2. 首页全链接分组
+st, home = get(BASE + "/", quiet=True)
+links = re.findall(r'href="([^"]+)"', home)
+groups = {}
+for h in links:
+    m = re.search(r"/([^/?#]+)", h if h.startswith("http") else "https://x.com/" + h.lstrip("/"))
+    if m:
+        p = m.group(1)
+        key = re.sub(r"[\d]+", "N", p)
+        groups.setdefault(key, []).append(h)
+print("\n[首页链接模式汇总]")
+for k, v in sorted(groups.items()):
+    print(f"  {k} x{len(v)}  e.g. {v[0][:110]}")
+
+# 3. 首页商品卡片完整片段（看有无 SOLD OUT/完売 标记、价格结构）
+i = home.find("goods_en_USD_")
+if i > 0:
+    print("\n[首页商品卡片片段]\n", clip(home[max(0,i-1500):i+1500], 2500))
+print("\n[首页 SOLDOUT/完売/Sold 关键词]", {kw: home.count(kw) for kw in ["SOLD", "Sold", "sold", "完売", "OUT"]})
+
+# 4. 商品页多语言/货币变体
+for variant in ["goods_en_JPY_2684.html", "goods_ja_JPY_2684.html", "goods_zhcn_JPY_2684.html", "goods_en_USD_2684.html?x=1"]:
+    st2, body = get(f"{BASE}/{variant}", quiet=True)
+    print(f"  variant {variant} -> {st2} {'BLOCKED' if not body else 'OK'}")
+
+# 5. content.php 试探（若首页存在）
+m = re.search(r'href="([^"]*content[^"]*)"', home)
+if m:
+    st3, cbody = get(m.group(1) if m.group(1).startswith("http") else BASE + "/" + m.group(1).lstrip("/"))
+    if cbody:
+        print("[content页 goods链接数]", len(re.findall(r"goods_", cbody)))
