@@ -1,65 +1,70 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""第十三轮探测：244 个商品实锤，定位翻页失效原因（重定向？缓存？链接形式？）"""
+"""第十四轮探测：goodslist_box 完整结构 + 全站 244 商品解析预览"""
 import re
 from curl_cffi import requests
 
 BASE = "https://tokyokawaiilife.com"
 s = requests.Session()
 
-def show(r, tag):
-    body = r.text
+def fetch(off):
+    r = s.get(f"{BASE}/index.php?lang_id=en&genre_id=&keyword=&sch_goods_tag=&act=search&sortkey=&offset={off}&tsuka_conv=USD", impersonate="chrome124", timeout=25)
+    return r.text
+
+b0 = fetch(0)
+# 打印第一个 goodslist_box 块完整 HTML（到下一个块开始）
+parts = re.split(r'(?=<div class="goodslist_box")', b0)
+boxes = [p for p in parts if p.startswith('<div class="goodslist_box"')]
+print(f"off0 goodslist_box 块数: {len(boxes)}")
+print("\n[第1块完整HTML]\n", re.sub(r"\s+", " ", boxes[0][:2600])[:2600])
+print("\n[第2块完整HTML]\n", re.sub(r"\s+", " ", boxes[1][:1800])[:1800] if len(boxes) > 1 else "")
+
+# 找一个带 SOLD OUT 或 セール 的块
+for b in boxes:
+    if "SOLD OUT" in b or "セール" in b:
+        print("\n[带SOLDOUT/セール块]\n", re.sub(r"\s+", " ", b[:2600])[:2600])
+        break
+
+# 全站翻页解析预览
+def parse_block(b):
+    gid_m = re.search(r'goods_en_USD_(\d+)\.html', b)
+    if not gid_m:
+        return None
+    gid = gid_m.group(1)
+    nm = re.search(r'<span class="gd_name">\s*<a href="[^"]*">\s*(.*?)</a>', b, re.S)
+    if not nm:
+        return None
+    name = re.sub(r"<!--.*?-->", "", nm.group(1), flags=re.S).strip()
+    prices = re.findall(r'<b>([\d,]+)\s*(?:&nbsp;)?\s*JPY</b>', b)
+    sold = bool(re.search(r'>\s*SOLD\s*OUT\s*<', b))
+    coming = "COMING SOON" in b
+    im = re.search(r'<img src="(https://cdn\.multilingualcart\.com/[^"]*goods_img/goods_' + gid + r'[^"]*)"', b)
+    return gid, name, prices, sold, coming, (im.group(1) if im else "")
+
+total = {}
+for off in range(0, 270, 30):
+    body = fetch(off)
+    parts = re.split(r'(?=<div class="goodslist_box")', body)
+    boxes = [p for p in parts if p.startswith('<div class="goodslist_box"')]
     pager = re.findall(r'\[\s*([\d,\s]+?)\s*-\s*([\d,\s]+?)\s*\]\s*of\s*\[\s*([\d,]+)\s*\]', body)
-    ids = sorted(set(re.findall(r'goods_en_USD_(\d+)\.html', body)), key=int)
-    hist = [(h.status_code, h.headers.get("Location", "")[:100]) for h in r.history]
-    print(f"{tag}: code={r.status_code} 最终URL={r.url[:120]} 重定向={hist}")
-    print(f"   页码指示: {pager[:3]} 唯一ID {len(ids)}  范围 {ids[:5]}...{ids[-5:]}")
-    return body
+    n_ok = 0
+    for b in boxes:
+        p = parse_block(b)
+        if p:
+            gid, name, prices, sold, coming, img = p
+            total[gid] = (name, prices, sold, coming, img)
+            n_ok += 1
+    print(f"off{off}: 页码{pager[0] if pager else '?'} 块{len(boxes)} 解析成功{n_ok}")
+    import time; time.sleep(2)
 
-# off0
-r0 = s.get(f"{BASE}/index.php?lang_id=en&act=search&tsuka_conv=USD&keyword=&genre_id=&sortkey=", impersonate="chrome124", timeout=25)
-b0 = show(r0, "off0 ")
-
-# off30（页面自带翻页链接的原始形式）
-r30 = s.get(f"{BASE}/index.php?lang_id=en&genre_id=&keyword=&sch_goods_tag=&act=search&sortkey=&offset=30&tsuka_conv=USD", impersonate="chrome124", timeout=25)
-b30 = show(r30, "off30")
-
-# off30 禁止自动重定向，看原始响应
-r30raw = s.get(f"{BASE}/index.php?lang_id=en&genre_id=&keyword=&sch_goods_tag=&act=search&sortkey=&offset=30&tsuka_conv=USD", impersonate="chrome124", timeout=25, allow_redirects=False)
-print(f"off30 无跟随: code={r30raw.status_code} Location={r30raw.headers.get('Location','')[:150]}")
-
-# 商品一覧区的原始 href 形式对比
-for tag, body in [("off0", b0), ("off30", b30)]:
-    i = body.find("商品があるときは商品一覧を表示")
-    seg = body[i:i+3000] if i > 0 else ""
-    hrefs = re.findall(r'href="([^"]*goods_en_USD_\d+\.html[^"]*)"', seg)[:6]
-    print(f"[{tag}] 商品一覧区 href 形式: {hrefs}")
-    ids_seg = re.findall(r'goods_en_USD_(\d+)\.html', seg)
-    print(f"[{tag}] 商品一覧区 ID: {ids_seg[:12]}")
-
-# 全部 href 形式统计（含相对路径）
-for tag, body in [("off0", b0), ("off30", b30)]:
-    forms = {}
-    for m in re.finditer(r'href="([^"]*goods_en_USD_\d+\.html)"', body):
-        h = m.group(1)
-        key = "absolute" if h.startswith("http") else "relative"
-        forms[key] = forms.get(key, 0) + 1
-    print(f"[{tag}] href 形式统计: {forms}")
-
-# off30 的列表区完整卡片数（相对+绝对都算）
-def parse_all(body):
-    out = {}
-    for m in re.finditer(r'<a href="[^"]*goods_en_USD_(\d+)\.html[^"]*">(.*?)</a>', body, re.S):
-        gid, inner = m.group(1), m.group(2)
-        nm = re.search(r'<p>\s*<span[^>]*>(.*?)</span>', inner, re.S) or re.search(r'gd_name[^>]*>\s*<a[^>]*>(.*?)</a>', inner, re.S)
-        if not nm: continue
-        name = re.sub(r"<!--.*?-->", "", nm.group(1), flags=re.S).strip()
-        pm = re.search(r'<b>([\d,]+)\s*(?:&nbsp;)?\s*JPY</b>', inner)
-        if not name or not pm: continue
-        out[gid] = name[:30]
-    return out
-
-c0, c30 = parse_all(b0), parse_all(b30)
-print(f"\n宽松解析: off0 卡片 {len(c0)}, off30 卡片 {len(c30)}, 交集 {len(set(c0)&set(c30))}")
-print("off30 独有:", sorted(set(c30)-set(c0))[:15])
-print("off0 独有:", sorted(set(c0)-set(c30))[:15])
+print(f"\n全站解析商品总数: {len(total)}")
+sold = [g for g, v in total.items() if v[2]]
+coming = [g for g, v in total.items() if v[3]]
+noprice = [g for g, v in total.items() if not v[1]]
+print(f"SOLD OUT: {len(sold)} {sold[:8]}")
+print(f"COMING SOON: {len(coming)} {coming[:8]}")
+print(f"无价格: {len(noprice)} {noprice[:8]}")
+print("\n[商品名样例]")
+for g in sorted(total, key=int)[:10]:
+    v = total[g]
+    print(f"  {g} {'[SO]' if v[2] else ''}{'[CS]' if v[3] else ''} 价格{v[1]} {v[0][:40]}")
