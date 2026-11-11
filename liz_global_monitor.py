@@ -78,7 +78,6 @@ CARD_RE = re.compile(
     r'<li>\s*<a href="' + re.escape(BASE) + r'/goods_en_USD_(\d+)\.html">(.*?)</a>\s*</li>', re.S)
 PRICE_RE = re.compile(r'<b>([\d,]+)\s*(?:&nbsp;)?\s*JPY</b>')
 SOLD_RE = re.compile(r'>\s*SOLD\s*OUT\s*<')
-IMG_RE = re.compile(r'https://cdn\.multilingualcart\.com/[^"\']*goods_img/goods_\1[^"\']*')
 
 def parse_cards(html):
     """解析列表页所有商品卡片 → {goods_id: {...}}；返回 None 表示页面无效"""
