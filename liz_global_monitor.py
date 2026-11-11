@@ -39,7 +39,7 @@ SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY", "")
 ENABLE_WECHAT = False     # 微信推送总开关（当前停用，改为 True 恢复）
 BARK_URL = os.environ.get("BARK_URL", "").rstrip("/")
 PAGE_DELAY = 2.5          # 翻页间隔（秒），CF 站点礼貌抓取
-MAX_PAGES_PER_GENRE = 15  # 单分类翻页上限（每页 30 个商品，兜底）
+MAX_PAGES_PER_GENRE = 8   # 单分类翻页上限（每页 30 个商品，兜底）
 REQUEST_TIMEOUT = 25
 STATE_FILE = os.environ.get("STATE_FILE", "/tmp/liz_global_state.json")
 
@@ -72,22 +72,24 @@ def fetch_page(url, retries=3, base_delay=10):
     raise RuntimeError(f"抓取失败（重试后仍失败）: {url}")
 
 # ======================== 解析 ========================
-# 列表区商品卡片：<li><a href="goods_en_USD_{id}.html"><img .../><p><span>名称</span></p>
-# <p class="re_en"><b>17,000&nbsp;JPY</b>...</p>[<span ...>SOLD OUT</span>]</a></li>
-CARD_RE = re.compile(
-    r'<li>\s*<a href="' + re.escape(BASE) + r'/goods_en_USD_(\d+)\.html">(.*?)</a>\s*</li>', re.S)
+# 卡片统一结构：<a href="goods_en_USD_{id}.html"> ... </a> 内含
+#   名称 <p><span>...</span></p>、价格 <p class="re_en"><b>17,000&nbsp;JPY</b>...、
+#   卖空标记 <span ...>SOLD OUT</span>（仅卖空时出现）
+# 首页轮播等纯图片链接无名称/价格，自动跳过
+LINK_RE = re.compile(
+    r'<a href="' + re.escape(BASE) + r'/goods_en_USD_(\d+)\.html">(.*?)</a>', re.S)
 PRICE_RE = re.compile(r'<b>([\d,]+)\s*(?:&nbsp;)?\s*JPY</b>')
 SOLD_RE = re.compile(r'>\s*SOLD\s*OUT\s*<')
 
 def parse_cards(html):
-    """解析列表页所有商品卡片 → {goods_id: {...}}；返回 None 表示页面无效"""
+    """解析页面所有商品卡片 → {goods_id: {...}}；返回 None 表示页面无效"""
     products = {}
-    for m in CARD_RE.finditer(html):
+    for m in LINK_RE.finditer(html):
         gid, inner = m.group(1), m.group(2)
         # 名称：第一个 <p><span>...</span></p>，去掉 HTML 注释（COMING SOON 标记等）
         nm = re.search(r'<p>\s*<span[^>]*>(.*?)</span>', inner, re.S)
         if not nm:
-            continue   # 轮播区卡片无名称，跳过
+            continue   # 纯图片链接（轮播等），跳过
         name = re.sub(r"<!--.*?-->", "", nm.group(1), flags=re.S).strip()
         if not name:
             continue
