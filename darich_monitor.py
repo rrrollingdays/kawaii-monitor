@@ -146,13 +146,15 @@ def _event_rows(events):
     rows = ""
     for e in events:
         img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
-        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">{e.get("sku", "")}</span></td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+        code_html = f'<br><span style="color:#999;font-size:12px;">货号: {e["code"]}</span>' if e.get("code") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}{code_html}<br><span style="color:#999;font-size:12px;">{e.get("sku", "")}</span></td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
     return rows
 
 def _event_desp(events, heading):
     desp = f"### {heading}\n\n"
     for e in events:
-        desp += f"**{e['product_name']}**\n- SKU: {e.get('sku', '全色')}\n- [查看商品]({e['url']})\n"
+        code_line = f"- 货号: {e['code']}\n" if e.get("code") else ""
+        desp += f"**{e['product_name']}**\n{code_line}- SKU: {e.get('sku', '全色')}\n- [查看商品]({e['url']})\n"
         if e.get("image"):
             desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
         desp += "\n"
@@ -169,11 +171,13 @@ def _notify_sale(events):
     rows = ""
     for e in events:
         img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
-        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#c0392b;font-weight:bold;">¥{e["new_price"]:,}（-{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+        code_html = f'<br><span style="color:#999;font-size:12px;">货号: {e["code"]}</span>' if e.get("code") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}{code_html}</td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#c0392b;font-weight:bold;">¥{e["new_price"]:,}（-{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
     body = f'<html><body><h2 style="color:#c0392b;">📉 [darich] 限时折扣</h2><p>{len(events)} 个商品降价:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
     desp = "### [darich] 限时折扣\n\n"
     for e in events:
-        desp += f"**{e['product_name']}**\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（-{e['discount']}）\n- [查看商品]({e['url']})\n"
+        code_line = f"- 货号: {e['code']}\n" if e.get("code") else ""
+        desp += f"**{e['product_name']}**\n{code_line}- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（-{e['discount']}）\n- [查看商品]({e['url']})\n"
         if e.get("image"):
             desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
         desp += "\n"
@@ -192,11 +196,13 @@ def _notify_priceup(events):
     rows = ""
     for e in events:
         img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
-        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">¥{e["new_price"]:,}（+{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+        code_html = f'<br><span style="color:#999;font-size:12px;">货号: {e["code"]}</span>' if e.get("code") else ""
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}{code_html}</td><td style="padding:8px;border:1px solid #ddd;">{e.get("compare_txt", "")}</td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">¥{e["new_price"]:,}（+{e["discount"]}）</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
     body = f'<html><body><h2 style="color:#27ae60;">📈 [darich] 价格回调</h2><p>{len(events)} 个商品涨价:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
     desp = "### [darich] 价格回调\n\n"
     for e in events:
-        desp += f"**{e['product_name']}**\n- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（+{e['discount']}）\n- [查看商品]({e['url']})\n"
+        code_line = f"- 货号: {e['code']}\n" if e.get("code") else ""
+        desp += f"**{e['product_name']}**\n{code_line}- {e.get('compare_txt', '')}→ **¥{e['new_price']:,}**（+{e['discount']}）\n- [查看商品]({e['url']})\n"
         if e.get("image"):
             desp += f"<img src=\"{e['image']}\" width=\"220\"><br>\n"
         desp += "\n"
@@ -207,7 +213,7 @@ def _notify_priceup(events):
 def _notify_soldout(events):
     if len(events) == 1:
         e = events[0]
-        subject = f"🚨 [darich] 卖空: {e['product_name']} - {e['sku']}"
+        subject = f"🚨 [darich] 卖空: {e['product_name']}（货号{e['code']}） - {e['sku']}"
         title = f"[darich]卖空:{e['product_name'][:15]}"
     else:
         subject = f"🚨 [darich] {len(events)} 个SKU卖空"
@@ -215,7 +221,7 @@ def _notify_soldout(events):
     rows = ""
     for e in events:
         img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
-        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#e74c3c;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">货号: {e["code"]}</span></td><td style="padding:8px;border:1px solid #ddd;color:#e74c3c;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
     body = f'<html><body><h2 style="color:#e74c3c;">🚨 [darich] 商品卖空告警</h2><p>{len(events)} 个SKU卖空:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
     desp = _event_desp(events, "[darich] 卖空告警")
     send_email(subject, body)
@@ -225,7 +231,7 @@ def _notify_soldout(events):
 def _notify_restock(events):
     if len(events) == 1:
         e = events[0]
-        subject = f"📦 [darich] 补货: {e['product_name']} - {e['sku']}"
+        subject = f"📦 [darich] 补货: {e['product_name']}（货号{e['code']}） - {e['sku']}"
         title = f"[darich]补货:{e['product_name'][:15]}"
     else:
         subject = f"📦 [darich] {len(events)} 个SKU补货"
@@ -233,7 +239,7 @@ def _notify_restock(events):
     rows = ""
     for e in events:
         img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
-        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">货号: {e["code"]}</span></td><td style="padding:8px;border:1px solid #ddd;color:#27ae60;font-weight:bold;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
     body = f'<html><body><h2 style="color:#27ae60;">📦 [darich] 补货通知</h2><p>{len(events)} 个SKU已补货上架:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
     desp = _event_desp(events, "[darich] 补货通知")
     send_email(subject, body)
@@ -243,7 +249,7 @@ def _notify_restock(events):
 def _notify_new(events):
     if len(events) == 1:
         e = events[0]
-        subject = f"🆕 [darich] 上新: {e['product_name']}"
+        subject = f"🆕 [darich] 上新: {e['product_name']}（货号{e['code']}）"
         title = f"[darich]上新:{e['product_name'][:15]}"
     else:
         subject = f"🆕 [darich] {len(events)} 个商品上新"
@@ -251,7 +257,7 @@ def _notify_new(events):
     rows = ""
     for e in events:
         img_html = f'<img src="{e["image"]}" style="max-width:120px;max-height:150px;border:1px solid #ddd;">' if e.get("image") else ""
-        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}</td><td style="padding:8px;border:1px solid #ddd;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
+        rows += f'<tr><td style="padding:8px;border:1px solid #ddd;">{img_html}</td><td style="padding:8px;border:1px solid #ddd;">{e["product_name"]}<br><span style="color:#999;font-size:12px;">货号: {e["code"]}</span></td><td style="padding:8px;border:1px solid #ddd;">{e["sku"]}</td><td style="padding:8px;border:1px solid #ddd;"><a href="{e["url"]}">查看</a></td></tr>'
     body = f'<html><body><h2 style="color:#e67e22;">🆕 [darich] 上新通知</h2><p>{len(events)} 个新商品上架:</p><table style="border-collapse:collapse;">{rows}</table></body></html>'
     desp = _event_desp(events, "[darich] 上新通知")
     send_email(subject, body)
@@ -359,10 +365,10 @@ def main():
     if "--test-notify" in sys.argv:
         url = PRODUCT_URL_TEMPLATE.format("112638001")
         notify_events([
-            {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "sku": "PNK / FREE", "url": url, "image": "", "time": datetime.now().isoformat()},
-            {"type": "RESTOCK", "product_name": "【测试-补货】", "sku": "BLK / FREE", "url": url, "image": "", "time": datetime.now().isoformat()},
-            {"type": "NEW", "product_name": "【测试-上新】", "sku": "WHT / FREE", "url": url, "image": "", "time": datetime.now().isoformat()},
-            {"type": "SALE", "product_name": "【测试-折扣】", "sku": "全色", "url": url, "image": "", "new_price": 11550, "discount": "30%", "compare_txt": "~~¥16,500~~ →", "time": datetime.now().isoformat()},
+            {"type": "SOLD_OUT", "product_name": "【测试-卖空】", "code": "612621008", "sku": "PNK / FREE", "url": url, "image": "", "time": datetime.now().isoformat()},
+            {"type": "RESTOCK", "product_name": "【测试-补货】", "code": "612624013", "sku": "BLK / FREE", "url": url, "image": "", "time": datetime.now().isoformat()},
+            {"type": "NEW", "product_name": "【测试-上新】", "code": "612634003", "sku": "WHT / FREE", "url": url, "image": "", "time": datetime.now().isoformat()},
+            {"type": "SALE", "product_name": "【测试-折扣】", "code": "112638001", "sku": "全色", "url": url, "image": "", "new_price": 11550, "discount": "30%", "compare_txt": "~~¥16,500~~ →", "time": datetime.now().isoformat()},
         ])
         return
 
@@ -405,7 +411,7 @@ def main():
             if not is_baseline:
                 first_sku = next(iter(info["skus"].keys()), "")
                 sku_image = color_images.get(first_sku, "") or info["image"]
-                events.append({"type": "NEW", "product_name": info["name"], "sku": first_sku, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+                events.append({"type": "NEW", "product_name": info["name"], "code": handle, "sku": first_sku, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                 logger.info(f"🆕 上新: {info['name']}")
 
         # —— 卖空/补货检测 ——
@@ -414,10 +420,10 @@ def main():
                 was = prev_skus.get(sn, False)
                 sku_image = color_images.get(sn, "") or info["image"]
                 if so and not was:
-                    events.append({"type": "RESTOCK", "product_name": info["name"], "sku": sn, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+                    events.append({"type": "RESTOCK", "product_name": info["name"], "code": handle, "sku": sn, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"📦 补货: {info['name']} - {sn}")
                 elif not so and was:
-                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "sku": sn, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
+                    events.append({"type": "SOLD_OUT", "product_name": info["name"], "code": handle, "sku": sn, "url": url, "image": sku_image, "time": datetime.now().isoformat()})
                     logger.info(f"🚨 卖空: {info['name']} - {sn}")
 
         # —— 折扣/回调检测（对比上轮价格）——
@@ -428,7 +434,7 @@ def main():
                 if new_price > old_price:
                     rise = round((new_price / old_price - 1) * 100)
                     if rise >= 2:
-                        events.append({"type": "PRICE_UP", "product_name": info["name"], "sku": "全色", "url": url, "image": info["image"], "new_price": new_price, "discount": f"{rise}%", "compare_txt": f"¥{old_price:,} →", "time": datetime.now().isoformat()})
+                        events.append({"type": "PRICE_UP", "product_name": info["name"], "code": handle, "sku": "全色", "url": url, "image": info["image"], "new_price": new_price, "discount": f"{rise}%", "compare_txt": f"¥{old_price:,} →", "time": datetime.now().isoformat()})
                         logger.info(f"📈 回调: {info['name']} ¥{old_price:,}→¥{new_price:,}")
                 else:
                     if info["compare"] and info["compare"] > new_price:
@@ -437,7 +443,7 @@ def main():
                         base_price, compare_txt = old_price, f"¥{old_price:,} →"
                     discount = round((1 - new_price / base_price) * 100)
                     if discount >= 2:
-                        events.append({"type": "SALE", "product_name": info["name"], "sku": "全色", "url": url, "image": info["image"], "new_price": new_price, "discount": f"{discount}%", "compare_txt": compare_txt, "time": datetime.now().isoformat()})
+                        events.append({"type": "SALE", "product_name": info["name"], "code": handle, "sku": "全色", "url": url, "image": info["image"], "new_price": new_price, "discount": f"{discount}%", "compare_txt": compare_txt, "time": datetime.now().isoformat()})
                         logger.info(f"📉 折扣: {info['name']} ¥{old_price:,}→¥{new_price:,}")
 
     logger.info(f"本轮扫描完成: {len(current)} 个商品, {len(events)} 个变化")
