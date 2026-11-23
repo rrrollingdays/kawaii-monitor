@@ -27,7 +27,7 @@ jobs:
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           BARK_URL: ${{ secrets.BARK_URL }}
           STATE_FILE: andmary_state.json
-        run: python andmary_monitor.py --test-notify
+        run: python andmary_monitor.py
       - name: Save state
         run: |
           git config user.name "github-actions[bot]"
