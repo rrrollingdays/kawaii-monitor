@@ -27,7 +27,7 @@ jobs:
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           BARK_URL: ${{ secrets.BARK_URL }}
           STATE_FILE: wego_whinny_state.json
-        run: python wego_whinny_monitor.py --test-notify
+        run: python wego_whinny_monitor.py
       - name: Save state
         run: |
           git config user.name "github-actions[bot]"
