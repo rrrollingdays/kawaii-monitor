@@ -16,7 +16,10 @@ palcloset.jp / OLIVE des OLIVE 卖空/补货/上新监控脚本 v2
 - 邮件(多收件人) + 微信 + Bark(带图) 三通道通知
 """
 import sys, os, re, json, smtplib, logging, ssl, time
-from datetime import datetime
+from datetime import datetime, timezone
+from html import unescape
+
+from olive_stock_queue import export_stock_updates
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.request import Request, urlopen
@@ -167,7 +170,7 @@ def parse_item_page(html):
     # 所以 class 必须宽松匹配"包含 clearfix f_wrap"而不是前缀匹配。
     dls = [(m.start(), m.group(0)) for m in re.finditer(r'<dl class="[^"]*clearfix f_wrap[^"]*"[^>]*>.*?</dl>', html, re.S)]
     if not dls:
-        return {}
+        return {}, 0
     skus = {}
     cur_color = ""
     ci = 0
@@ -186,7 +189,10 @@ def parse_item_page(html):
         state = "OUT" if "在庫なし" in dt_text else "OK"
         size = dt_text.split("/")[0].strip() if "/" in dt_text else ""
         # 预约（予約）状态也算 OK（可以下单）；仅"在庫なし"才算卖空
-        skus[sku_m.group(1)] = {"variant": cur_color, "size": size, "state": state}
+        stock_hint = unescape(re.sub(r"<[^>]+>", "", dt_text.split("/", 1)[-1]))
+        skus[sku_m.group(1)] = {
+            "variant": cur_color, "size": size, "state": state, "stock_hint": stock_hint,
+        }
     # 商品级价格（税抜，服务端渲染的隐藏字段，打折时同步变化）
     goods_price = 0
     pm = re.search(r'name="parteGoodsSalePrice"\s+value="(\d+)"', html)
@@ -526,12 +532,14 @@ def main():
                 elif old.get("state") == "OUT" and s["state"] == "OK":
                     events.append({"type": "RESTOCK", "product_name": name, "sku": label,
                                    "number": gid, "url": url, "image": image,
-                                   "time": datetime.now().isoformat()})
+                                   "source_sku_id": scd, "stock_hint": s.get("stock_hint", ""),
+                                   "time": datetime.now(timezone.utc).isoformat()})
                     logger.info(f"📦 补货: {name} - {label}")
                 elif old.get("state") == "OK" and s["state"] == "OUT":
                     events.append({"type": "SOLD_OUT", "product_name": name, "sku": label,
                                    "number": gid, "url": url, "image": image,
-                                   "time": datetime.now().isoformat()})
+                                   "source_sku_id": scd, "stock_hint": s.get("stock_hint", ""),
+                                   "time": datetime.now(timezone.utc).isoformat()})
                     logger.info(f"🚨 卖空: {name} - {label}")
 
             # ===== 折扣检测（商品级价格下降）=====
@@ -565,6 +573,11 @@ def main():
         notify_events(events)
     else:
         logger.info("本轮无变化")
+
+    destination = os.environ.get("OLIVE_STOCK_UPDATES_CSV")
+    if destination and not first_run:
+        count = export_stock_updates(events, destination)
+        logger.info("淘宝待更新记录: %d 条", count)
 
     seen_goods |= set(new_goods_state.keys())
     save_state({
