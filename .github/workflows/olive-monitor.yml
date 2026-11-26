@@ -31,14 +31,6 @@ jobs:
           OLIVE_STOCK_UPDATES_CSV: olive-stock-updates.csv
         run: python olive_monitor.py
 
-      - name: Upload pending inventory updates
-        if: ${{ hashFiles('olive-stock-updates.csv') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: olive-stock-updates-${{ github.run_attempt }}
-          path: olive-stock-updates.csv
-          if-no-files-found: error
-
       - name: Save state
         run: |
           git config user.name "github-actions[bot]"
@@ -53,3 +45,13 @@ jobs:
           done
           echo "Failed to push after retries"
           exit 1
+
+      - name: Upload pending inventory updates
+        if: ${{ hashFiles('olive-stock-updates.csv') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: olive-stock-updates-${{ github.run_attempt }}
+          path: olive-stock-updates.csv
+          if-no-files-found: error

@@ -18,8 +18,6 @@ palcloset.jp / OLIVE des OLIVE 卖空/补货/上新监控脚本 v2
 import sys, os, re, json, smtplib, logging, ssl, time
 from datetime import datetime, timezone
 from html import unescape
-
-from olive_stock_queue import export_stock_updates
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.request import Request, urlopen
@@ -574,11 +572,6 @@ def main():
     else:
         logger.info("本轮无变化")
 
-    destination = os.environ.get("OLIVE_STOCK_UPDATES_CSV")
-    if destination and not first_run:
-        count = export_stock_updates(events, destination)
-        logger.info("淘宝待更新记录: %d 条", count)
-
     seen_goods |= set(new_goods_state.keys())
     save_state({
         "_goods": new_goods_state,
@@ -587,6 +580,16 @@ def main():
         "_prices": new_prices,
     })
     logger.info(f"状态已保存（{len(seen_goods)} 个商品）")
+
+    destination = os.environ.get("OLIVE_STOCK_UPDATES_CSV")
+    if destination and not first_run:
+        try:
+            from olive_stock_queue import export_stock_updates
+
+            count = export_stock_updates(events, destination)
+            logger.info("淘宝待更新记录: %d 条", count)
+        except Exception:
+            logger.exception("淘宝待更新清单导出失败")
 
 if __name__ == "__main__":
     main()
