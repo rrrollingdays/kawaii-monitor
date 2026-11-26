@@ -28,7 +28,16 @@ jobs:
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           BARK_URL: ${{ secrets.BARK_URL }}
           STATE_FILE: olive_state.json
+          OLIVE_STOCK_UPDATES_CSV: olive-stock-updates.csv
         run: python olive_monitor.py
+
+      - name: Upload pending inventory updates
+        if: ${{ hashFiles('olive-stock-updates.csv') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: olive-stock-updates-${{ github.run_attempt }}
+          path: olive-stock-updates.csv
+          if-no-files-found: error
 
       - name: Save state
         run: |
