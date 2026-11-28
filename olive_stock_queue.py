@@ -42,16 +42,39 @@ def export_stock_updates(events, destination):
             "卖空" if event["type"] == "SOLD_OUT" else "补货",
             target_quantity(event), "待处理",
         ))
+    return write_csv(destination, (
+        "事件编号", "检测时间", "商家编码", "淘宝商品ID", "来源SKUID",
+        "淘宝颜色分类", "淘宝尺码", "库存变化", "目标库存", "处理状态",
+    ), rows)
+
+
+def export_brand_changes(events, destination):
+    rows = []
+    for event in events:
+        if event["type"] not in {"SOLD_OUT", "RESTOCK"} or not event.get("source_sku_id"):
+            continue
+        label = str(event["sku"])
+        if label.lstrip().startswith(("=", "+", "-", "@")) or label.startswith(("\t", "\r", "\n")):
+            label = "'" + label
+        rows.append((
+            event["time"], event["number"], event["source_sku_id"], label,
+            "卖空" if event["type"] == "SOLD_OUT" else "补货",
+            target_quantity(event),
+            "已匹配" if event["number"] == ITEM_CODE and event["source_sku_id"] in COLORS else "待匹配",
+        ))
+    return write_csv(destination, (
+        "检测时间", "官网货号", "来源SKUID", "官网规格", "库存变化", "目标库存", "淘宝预约规格匹配",
+    ), rows)
+
+
+def write_csv(destination, headings, rows):
     if not rows:
         return 0
     path = Path(destination)
     temporary = path.with_suffix(".tmp")
     with temporary.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow((
-            "事件编号", "检测时间", "商家编码", "淘宝商品ID", "来源SKUID",
-            "淘宝颜色分类", "淘宝尺码", "库存变化", "目标库存", "处理状态",
-        ))
+        writer.writerow(headings)
         writer.writerows(rows)
     os.replace(temporary, path)
     return len(rows)
