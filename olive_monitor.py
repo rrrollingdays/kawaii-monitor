@@ -591,5 +591,15 @@ def main():
         except Exception:
             logger.exception("淘宝待更新清单导出失败")
 
+    brand_destination = os.environ.get("OLIVE_BRAND_CHANGES_CSV")
+    if brand_destination and not first_run:
+        try:
+            from olive_stock_queue import export_brand_changes
+
+            count = export_brand_changes(events, brand_destination)
+            logger.info("OLIVE 全品牌库存变化: %d 条", count)
+        except Exception:
+            logger.exception("OLIVE 全品牌库存变化导出失败")
+
 if __name__ == "__main__":
     main()
