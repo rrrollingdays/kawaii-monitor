@@ -29,6 +29,7 @@ jobs:
           BARK_URL: ${{ secrets.BARK_URL }}
           STATE_FILE: olive_state.json
           OLIVE_STOCK_UPDATES_CSV: olive-stock-updates.csv
+          OLIVE_BRAND_CHANGES_CSV: olive-brand-changes.csv
         run: python olive_monitor.py
 
       - name: Save state
@@ -54,4 +55,14 @@ jobs:
         with:
           name: olive-stock-updates-${{ github.run_attempt }}
           path: olive-stock-updates.csv
+          if-no-files-found: error
+
+      - name: Upload OLIVE brand stock changes
+        if: ${{ hashFiles('olive-brand-changes.csv') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: olive-brand-changes-${{ github.run_attempt }}
+          path: olive-brand-changes.csv
           if-no-files-found: error
